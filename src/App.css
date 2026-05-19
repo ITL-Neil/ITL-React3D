@@ -1,0 +1,22 @@
+.page {
+  min-height: 100vh;
+  padding: 24px;
+  background: #0f1115;
+  color: #fff;
+  box-sizing: border-box;
+}
+
+.title {
+  margin: 0 0 16px;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.frame {
+  width: 100%;
+  height: calc(100vh - 96px);
+  border: 2px solid #3a3f4b;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #101010;
+}
