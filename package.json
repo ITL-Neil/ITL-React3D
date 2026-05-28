@@ -1,18 +1,49 @@
-{
-  "name": "test2element",
+ {
+  "name": "itl3d",
+  "version": "0.0.1",
   "private": true,
-  "version": "0.0.0",
-  "type": "module",
+  "description": "A React 3D component library based on Three.js",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "component"
+  ],
+  "keywords": [
+    "react",
+    "three.js",
+    "3d",
+    "component",
+    "library"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:lib": "vite build --mode lib",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@capacitor/core": "^5.0.0",
+    "@capacitor/filesystem": "^5.0.0",
     "@react-three/drei": "9.13.2",
     "@react-three/fiber": "8.2.2",
     "@types/three": "0.143.0",
+    "draco3d": "^1.5.7",
     "react": "18.2.0",
     "react-dom": "18.2.0",
     "three": "0.143.0"
@@ -27,8 +58,10 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.6.0",
+    "sharp": "^0.34.5",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.59.2",
-    "vite": "^8.0.12"
+    "vite": "^8.0.12",
+    "vite-plugin-dts": "^4.5.4"
   }
 }

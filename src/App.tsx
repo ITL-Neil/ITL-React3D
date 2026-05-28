@@ -1,4 +1,4 @@
-import { ITL3D } from '../Element/ITL3D'
+import { ITL3D } from '../component/ITL3D'
 import './App.css'
 
 function App() {
@@ -7,7 +7,7 @@ function App() {
       <h1 className="title">ITL3D Element Demo</h1>
       <div className="frame">
         <ITL3D
-          modelUrl="/Hohenzollern_Castle_optimized.glb"
+          modelUrl="/Hohenzollern_output.glb"
           mode="cutBody"
           cutDepth={35}
           cutAngle={0}

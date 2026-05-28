@@ -23,8 +23,6 @@
   },
   "include": [
     "src",
-    "../Element/**/*.ts",
-    "../Element/**/*.tsx",
-    "../src/PreciseDualModeModel.tsx"
+    "component"
   ]
 }
