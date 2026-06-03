@@ -7,7 +7,7 @@ function App() {
       <h1 className="title">ITL3D Element Demo</h1>
       <div className="frame">
         <ITL3D
-          modelUrl="/Hohenzollern_output.glb"
+          modelUrl="/Calcata_output.glb"
           mode="cutBody"
           cutDepth={35}
           cutAngle={0}

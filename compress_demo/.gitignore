@@ -1,0 +1,9 @@
+**/bin/
+**/obj/
+**/Temp/
+**/node_modules/
+**/dist/
+*.user
+*.suo
+*.log
+.DS_Store
