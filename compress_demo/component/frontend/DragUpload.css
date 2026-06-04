@@ -1,0 +1,78 @@
+.drag-upload {
+  width: 100%;
+}
+
+.drag-upload__zone {
+  min-height: 220px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  padding: 24px;
+  border: 2px dashed #9eb0c8;
+  border-radius: 8px;
+  background: #f9fbfe;
+  color: #17202b;
+  cursor: pointer;
+  text-align: center;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.drag-upload__zone:hover,
+.drag-upload__zone:focus-visible,
+.drag-upload__zone--dragging {
+  border-color: #2e7d64;
+  background: #f2fbf7;
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.drag-upload__zone--disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+  transform: none;
+}
+
+.drag-upload__zone input {
+  display: none;
+}
+
+.drag-upload__badge {
+  width: 58px;
+  height: 58px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #17202b;
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.drag-upload__zone strong {
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.drag-upload__zone span {
+  max-width: 460px;
+  color: #607086;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.drag-upload__error {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border: 1px solid #f0b8b8;
+  border-radius: 8px;
+  background: #fff5f5;
+  color: #a12a2a;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
