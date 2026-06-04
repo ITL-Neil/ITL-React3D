@@ -1,0 +1,15 @@
+E:\3D\ITL\compress\component\backend\bin\Debug\net8.0\assimp.dll
+E:\3D\ITL\compress\component\backend\bin\Debug\net8.0\GlbCompressLib.deps.json
+E:\3D\ITL\compress\component\backend\bin\Debug\net8.0\GlbCompressLib.dll
+E:\3D\ITL\compress\component\backend\bin\Debug\net8.0\GlbCompressLib.pdb
+E:\3D\ITL\compress\component\backend\bin\Debug\net8.0\AssimpNet.dll
+E:\3D\ITL\compress\component\backend\obj\Debug\net8.0\GlbCompressLib.csproj.AssemblyReference.cache
+E:\3D\ITL\compress\component\backend\obj\Debug\net8.0\GlbCompressLib.GeneratedMSBuildEditorConfig.editorconfig
+E:\3D\ITL\compress\component\backend\obj\Debug\net8.0\GlbCompressLib.AssemblyInfoInputs.cache
+E:\3D\ITL\compress\component\backend\obj\Debug\net8.0\GlbCompressLib.AssemblyInfo.cs
+E:\3D\ITL\compress\component\backend\obj\Debug\net8.0\GlbCompressLib.csproj.CoreCompileInputs.cache
+E:\3D\ITL\compress\component\backend\obj\Debug\net8.0\GlbCompr.E524F129.Up2Date
+E:\3D\ITL\compress\component\backend\obj\Debug\net8.0\GlbCompressLib.dll
+E:\3D\ITL\compress\component\backend\obj\Debug\net8.0\refint\GlbCompressLib.dll
+E:\3D\ITL\compress\component\backend\obj\Debug\net8.0\GlbCompressLib.pdb
+E:\3D\ITL\compress\component\backend\obj\Debug\net8.0\ref\GlbCompressLib.dll

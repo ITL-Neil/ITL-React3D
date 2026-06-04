@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>GlbCompressorComponent</RootNamespace>
+    <AssemblyName>GlbCompressLib</AssemblyName>
+    <!-- 类库：不生成可执行文件 -->
+    <OutputType>Library</OutputType>
+    <!-- NuGet 包信息 -->
+    <PackageId>GlbCompressLib</PackageId>
+    <Version>1.0.0</Version>
+    <Description>3D 模型文件上传、格式转换、GLB 压缩组件库 —— ASP.NET Core 后端</Description>
+  </PropertyGroup>
+
+  <!-- ASP.NET Core 框架引用（Minimal API / IResult 等） -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <!-- AssimpNet 手动引用 -->
+  <ItemGroup>
+    <Reference Include="AssimpNet">
+      <HintPath>libs\AssimpNet.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Assimp 本机库（win-x64），拷贝到输出目录 -->
+  <ItemGroup>
+    <Content Include="libs\assimp.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>%(FileName)%(Extension)</Link>
+    </Content>
+  </ItemGroup>
+
+</Project>

@@ -1,78 +1,69 @@
-# ITL3D - React 3D Component Library
+# 3D 模型文件压缩工具
 
-一个基于 React Three Fiber 的 3D 模型展示和切割组件库。
+简易前后端分离 Web 应用，用于上传 GLB 文件并调用 `gltf-transform` 执行 Draco 压缩和纹理 WebP 转换。
 
-> ⚠️ **注意**：这是一个私有包，不发布到公共 npm 仓库。请参考 [PRIVATE_PACKAGE_USAGE.md](./PRIVATE_PACKAGE_USAGE.md) 了解如何在其他项目中使用。
+## 效果展示
+![alt text](<READMEFILL/Format conversion and compression effect result.jpg>)
 
-![image.png](READMEFILE/image.png)
-## 📦 安装（私有使用）
+## 目录结构
 
-详见 [PRIVATE_PACKAGE_USAGE.md](./PRIVATE_PACKAGE_USAGE.md)
+- `backend/`：C# ASP.NET Core 后端
+- `frontend/`：React + Vite 前端
 
-## 🚀 快速开始
+## 环境依赖
 
-```tsx
-import { ITL3D } from 'itl3d'
+后端需要本机可直接执行 `gltf-transform`：
 
-function App() {
-  return (
-    <div style={{ width: '800px', height: '600px' }}>
-      <ITL3D
-        modelUrl="/your-model.glb"
-        mode="cutBody"
-        cutDepth={35}
-        cutAngle={0}
-        canRotate={true}
-      />
-    </div>
-  )
+```powershell
+npm install -g @gltf-transform/cli
+```
+
+如果命令不在 PATH 中，可在 `backend/appsettings.json` 的 `GltfTransform:Command` 配置完整路径。Windows 下建议使用 `gltf-transform.cmd` 或对应 `.cmd` 完整路径，避免 PowerShell 执行策略拦截 `.ps1`。
+
+临时文件默认写入系统临时目录下的 `glb-compressor` 文件夹。若要改回项目目录，可设置：
+
+```json
+"Storage": {
+  "TempDirectory": "Temp"
 }
 ```
 
-## 🛠️ 开发
+## 启动后端
 
-### 本地开发
-
-```bash
-# 安装依赖
-npm install
-
-# 启动开发服务器
-npm run dev
-
-# 构建库
-npm run build:lib
-
-# 预览构建结果
-npm run preview
+```powershell
+cd backend
+dotnet run
 ```
 
-### 在其他项目中使用
+默认地址：`http://localhost:5000`
 
-详见 [PRIVATE_PACKAGE_USAGE.md](./PRIVATE_PACKAGE_USAGE.md)
+## 启动前端
 
-## 📝 组件文档
+```powershell
+cd frontend
+npm install
+npm run dev
+```
 
-详细的组件 API 文档请查看 [component/README.md](./component/README.md)
+默认地址：`http://localhost:5173`
 
-## 👥 团队协作使用
+如需修改后端接口地址，可设置前端环境变量：
 
-这是一个私有包，不发布到公共 npm。团队成员可以通过以下方式使用：
+```powershell
+$env:VITE_API_URL = "http://localhost:5000/api/upload"
+npm run dev
+```
 
-### 推荐方式：Git 仓库
+## 前后端运行命令
+```bash
+npm.cmd run dev -- --host 127.0.0.1
+dotnet run
+```
 
-1. **将代码推送到 Git 仓库**（GitHub、GitLab、Gitee 等）
-2. **团队成员安装**：
-   ```bash
-   npm install git+https://github.com/your-username/itl3d.git
-   ```
-3. **在代码中使用**：
-   ```tsx
-   import { ITL3D } from 'itl3d'
-   ```
+## 接口
 
-详见 [TEAM_USAGE_GUIDE.md](./TEAM_USAGE_GUIDE.md) 了解所有使用方式。
+`POST /api/upload`
 
-## 📄 License
-
-MIT
+- 请求：`multipart/form-data`，字段名 `file`
+- 成功：返回 `compressed.glb` 文件流
+- 失败：返回 `{ "error": "具体错误信息" }`

@@ -1,29 +1,23 @@
-# DragUpload — 前端拖拽上传组件
+# Frontend — 拖拽上传组件 & 压缩 API Hook
 
-> React 18 + TypeScript 实现的通用文件拖拽上传组件，内置文件扩展名白名单校验，与业务完全解耦。
+> React 18 + TypeScript 前端组件库，提供两大核心能力：
+>
+> 1. **DragUpload**：通用文件拖拽上传组件，内置 84 种 3D 格式白名单校验
+> 2. **useCompressApi**：封装上传 → 压缩完整流程的 React Hook，零外部依赖
 
 ---
 
 ## 目录
 
-- [功能特性](#功能特性)
 - [文件清单](#文件清单)
-- [安装与引入](#安装与引入)
-- [Props 说明](#props-说明)
-- [使用示例](#使用示例)
+- [环境要求](#环境要求)
+- [DragUpload 组件](#dragupload-组件)
+  - [Props 说明](#props-说明)
+  - [使用示例](#使用示例)
+- [useCompressApi Hook](#usecompressapi-hook)
+  - [返回值说明](#返回值说明)
+  - [使用示例](#使用示例-1)
 - [支持的文件格式](#支持的文件格式)
-
----
-
-## 功能特性
-
-- ✅ 拖拽文件到区域自动校验并触发回调
-- ✅ 点击区域打开系统文件选择对话框
-- ✅ 键盘可访问性（`Enter` / `Space` 触发）
-- ✅ 文件扩展名白名单校验，不符合格式给出内联错误提示
-- ✅ 支持多选 / 单选切换
-- ✅ 禁用状态
-- ✅ 零额外 npm 依赖（仅依赖 React 18+）
 
 ---
 
@@ -31,25 +25,16 @@
 
 ```
 component/frontend/
-├── DragUpload.tsx    # 组件主体
-└── DragUpload.css    # 组件样式（可选替换为 Tailwind / CSS Module）
+├── DragUpload.tsx        # 拖拽上传 React 组件
+├── DragUpload.css        # 组件样式
+├── useCompressApi.ts     # 上传+压缩 React Hook
+├── index.ts              # 统一导出入口
+└── README.md             # 本文件
 ```
 
 ---
 
-## 安装与引入
-
-### 1. 复制文件
-
-将 `DragUpload.tsx` 和 `DragUpload.css` 复制到你的项目源码目录，例如：
-
-```
-src/components/DragUpload/
-├── DragUpload.tsx
-└── DragUpload.css
-```
-
-### 2. 环境要求
+## 环境要求
 
 | 依赖 | 版本要求 |
 |------|----------|
@@ -59,120 +44,176 @@ src/components/DragUpload/
 
 无需安装任何额外 npm 包。
 
-### 3. 在代码中引入
-
-```tsx
-import DragUpload from './components/DragUpload/DragUpload';
-```
-
 ---
 
-## Props 说明
+## DragUpload 组件
+
+拖拽或点击上传文件，自动校验扩展名白名单。
+
+### Props 说明
 
 | Prop | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `onFilesSelected` | `(files: File[]) => void` | **必填** | 文件通过校验后的回调，参数为 `File[]` |
-| `allowedExtensions` | `readonly string[]` | `DEFAULT_ALLOWED_EXTENSIONS`（见下方完整列表） | 允许的文件扩展名数组，小写，不含点号 |
+| `onFilesSelected` | `(files: File[]) => void` | **必填** | 文件通过校验后的回调 |
+| `allowedExtensions` | `readonly string[]` | `DEFAULT_ALLOWED_EXTENSIONS`（84 种） | 允许的文件扩展名（小写，不含点） |
 | `multiple` | `boolean` | `true` | 是否允许多选 |
-| `hint` | `string` | `'选择或拖拽文件上传'` | 拖拽区域主提示文字 |
-| `subHint` | `string` | `undefined` | 拖拽区域副提示文字 |
-| `disabled` | `boolean` | `false` | 禁用状态，禁用后不可交互 |
+| `hint` | `string` | `'选择或拖拽文件上传'` | 主提示文字 |
+| `subHint` | `string` | `undefined` | 副提示文字 |
+| `disabled` | `boolean` | `false` | 禁用状态 |
 
----
+### 使用示例
 
-## 使用示例
-
-### 基础用法（使用默认允许格式）
+#### 基础用法
 
 ```tsx
-import DragUpload from './components/DragUpload/DragUpload';
+import { DragUpload } from './components/GlbCompress';
 
-function MyPage() {
-  function handleFilesSelected(files: File[]) {
-    console.log('已选择文件：', files);
-    // 在此处上传或处理文件
-  }
-
+function Page() {
   return (
-    <DragUpload onFilesSelected={handleFilesSelected} />
+    <DragUpload
+      onFilesSelected={(files) => {
+        console.log('已选择:', files);
+      }}
+    />
   );
 }
 ```
 
-### 仅允许 GLB 文件（单选）
+#### 单选 + 限定格式
 
 ```tsx
 <DragUpload
-  allowedExtensions={['glb']}
+  allowedExtensions={['glb', 'fbx', 'obj']}
   multiple={false}
-  hint="拖拽 GLB 文件到此处"
-  subHint="仅支持 .glb 格式"
-  onFilesSelected={(files) => {
-    const glbFile = files[0];
-    uploadToServer(glbFile);
-  }}
+  hint="拖拽 3D 文件到此处"
+  subHint="支持 GLB、FBX、OBJ 格式"
+  onFilesSelected={(files) => doUpload(files[0])}
 />
 ```
 
-### 自定义多种格式
+---
+
+## useCompressApi Hook
+
+封装完整的「上传 → 格式转换 → 压缩 → 下载」流程。零外部依赖，自动管理异步状态。
+
+### 返回值说明
 
 ```tsx
-<DragUpload
-  allowedExtensions={['glb', 'gltf', 'fbx', 'obj']}
-  multiple={true}
-  onFilesSelected={(files) => {
-    for (const file of files) {
-      console.log(file.name, file.size);
-    }
-  }}
-/>
+const {
+  status,       // 'idle' | 'uploading' | 'processing' | 'success' | 'error'
+  isBusy,       // status === 'uploading' || status === 'processing' 的快捷值
+  error,        // 错误信息字符串
+  stats,        // CompressStats | null — 压缩统计
+  downloadUrl,  // Blob URL 字符串 — 可直接用于 <a href>
+  compress,     // (file: File) => Promise<void> — 执行上传压缩
+  reset,        // () => void — 重置到 idle 并释放 Blob URL
+  download,     // () => void — 触发浏览器下载
+} = useCompressApi(options?);
 ```
 
-### 配合上传逻辑（发送到后端）
+**CompressStats**:
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `originalSize` | `number` | 原始文件大小（字节） |
+| `compressedSize` | `number` | 压缩后文件大小（字节） |
+| `ratio` | `string` | 压缩率（如 `"35.2"`） |
+| `fileName` | `string` | 下载文件名 |
+
+**CompressApiOptions**:
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `apiUrl` | `string` | `VITE_API_URL` 或 `http://localhost:5100/api/compress` | 后端地址 |
+| `fieldName` | `string` | `"file"` | 表单字段名 |
+
+### 使用示例
+
+#### 完整集成（DragUpload + useCompressApi）
 
 ```tsx
-import { useState } from 'react';
-import DragUpload from './components/DragUpload/DragUpload';
+import { DragUpload, useCompressApi, formatBytes } from './components/GlbCompress';
 
-function UploadPage() {
-  const [status, setStatus] = useState('');
+function CompressPage() {
+  const {
+    status, isBusy, error, stats,
+    compress, download
+  } = useCompressApi({
+    apiUrl: 'http://localhost:5100/api/compress'
+  });
 
-  async function handleFilesSelected(files: File[]) {
-    setStatus('上传中...');
-    const formData = new FormData();
-    formData.append('file', files[0]);
-
-    const res = await fetch('/api/compress', { method: 'POST', body: formData });
-    if (res.ok) {
-      setStatus('压缩成功！');
-      const blob = await res.blob();
-      // 触发下载...
-    } else {
-      setStatus('上传失败');
-    }
+  async function handleFiles(files: File[]) {
+    await compress(files[0]);
+    download(); // 自动触发下载
   }
 
   return (
     <div>
       <DragUpload
-        allowedExtensions={['glb']}
+        onFilesSelected={handleFiles}
+        disabled={isBusy}
         multiple={false}
-        onFilesSelected={handleFilesSelected}
+        hint="拖拽 3D 文件到此处"
       />
-      <p>{status}</p>
+
+      {isBusy && <div className="progress">
+        {status === 'uploading' ? '上传中...' : '压缩处理中...'}
+      </div>}
+
+      {status === 'success' && stats && (
+        <div className="result">
+          <p>压缩完成！</p>
+          <p>原始：{formatBytes(stats.originalSize)}</p>
+          <p>压缩后：{formatBytes(stats.compressedSize)}</p>
+          <p>压缩率：{stats.ratio}%</p>
+          <a href={downloadUrl} download={stats.fileName}>重新下载</a>
+        </div>
+      )}
+
+      {status === 'error' && (
+        <p className="error">{error}</p>
+      )}
     </div>
   );
 }
+```
+
+#### 手动下载
+
+```tsx
+const { compress, downloadUrl, stats } = useCompressApi();
+
+// 不自动触发下载，让用户自己点击
+async function handleFiles(files: File[]) {
+  await compress(files[0]);
+}
+
+// JSX:
+<a href={downloadUrl} download={stats?.fileName}>下载压缩文件</a>
+```
+
+#### 使用 formatBytes 工具函数
+
+```tsx
+import { formatBytes } from './components/GlbCompress';
+
+console.log(formatBytes(1024));       // "1 KB"
+console.log(formatBytes(1536000));    // "1.5 MB"
+console.log(formatBytes(0));          // "0 B"
 ```
 
 ---
 
 ## 支持的文件格式
 
-> 以下为 `DEFAULT_ALLOWED_EXTENSIONS` 默认白名单，共 **84 种**扩展名，以列表中的扩展名为准。
+共 **84 种** 扩展名，与后端 `GlbConverter` 完全对齐。
 
-| 扩展名 | 扩展名 | 扩展名 | 扩展名 |
-|--------|--------|--------|--------|
+<details>
+<summary>点击展开完整列表</summary>
+
+| | | | |
+|---|---|---|---|
 | glb | gltf | ply | stl |
 | obj | off | dae | fbx |
 | dxf | ifc | xyz | pcd |
@@ -193,4 +234,6 @@ function UploadPage() {
 | babylon | ac3d | bvh | ase |
 | wkt | facet | | |
 
-若某格式存在多个常见扩展名（例如 STEP 对应 `.step` 和 `.stp`），两者均已收录于上述列表中，以列表中存在的扩展名为准。
+</details>
+
+若某格式存在多个常见扩展名（如 STEP 对应 `.step` 和 `.stp`），两者均已收录。

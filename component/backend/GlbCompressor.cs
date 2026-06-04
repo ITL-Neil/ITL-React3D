@@ -76,6 +76,32 @@ namespace GlbCompressorComponent
         // GLB 文件魔数：glTF（十六进制 0x46546C67）
         private static readonly byte[] GlbMagic = { 0x67, 0x6C, 0x54, 0x46 };
 
+        /// <summary>npm 全局安装的 gltf-transform CLI JS 入口</summary>
+        private static readonly Lazy<string?> NpmCliJsPath = new(() =>
+        {
+            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            var path = Path.Combine(localAppData, "npm", "node_modules", "@gltf-transform", "cli", "bin", "cli.js");
+            return File.Exists(path) ? path : null;
+        });
+
+        /// <summary>优先使用 WorkBuddy 托管的 Node.js，回退到系统 PATH</summary>
+        private static string NodeExePath
+        {
+            get
+            {
+                var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                var managedNode = Path.Combine(home, ".workbuddy", "binaries", "node", "versions", "22.22.2", "node.exe");
+                if (File.Exists(managedNode)) return managedNode;
+                return "node"; // fallback to PATH
+            }
+        }
+
+        /// <summary>暴露 Node.exe 路径（供 GlbConverter 等内部组件使用）</summary>
+        internal static string GetNodeExePath() => NodeExePath;
+
+        /// <summary>暴露 npm cli.js 路径（供 GlbConverter 等内部组件使用）</summary>
+        internal static string? GetNpmCliJsPath() => NpmCliJsPath.Value;
+
         // ---------------------------------------------------------------
         // 公共 API
         // ---------------------------------------------------------------
@@ -129,11 +155,21 @@ namespace GlbCompressorComponent
             // --- 构建 CLI 参数 ---
             var arguments = BuildArguments(inputPath, outputPath, options);
             var command = ResolveCommand(options.GltfTransformCommand);
+            var cliJsPath = NpmCliJsPath.Value;
+
+            // 优先直接用 node + cli.js 调用（避免 .cmd shim 的兼容性问题）
+            // 否则如果是 .cmd/.bat 文件，通过 cmd.exe /c 启动
+            bool isDirectNode = cliJsPath != null;
+            bool isCmdWrapper = !isDirectNode
+                && (command.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase)
+                 || command.EndsWith(".bat", StringComparison.OrdinalIgnoreCase));
 
             var startInfo = new ProcessStartInfo
             {
-                FileName = command,
-                Arguments = arguments,
+                FileName    = isDirectNode ? NodeExePath : (isCmdWrapper ? "cmd.exe" : command),
+                Arguments   = isDirectNode ? $"{Quote(cliJsPath!)} {arguments}"
+                            : isCmdWrapper ? $"/c \"{command}\" {arguments}"
+                            : arguments,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
@@ -166,16 +202,22 @@ namespace GlbCompressorComponent
             var stdout = await stdoutTask;
             var stderr = await stderrTask;
 
+            // 诊断日志
+            Console.Error.WriteLine($"[GlbCompressor] 命令: {startInfo.FileName} {startInfo.Arguments}");
+            Console.Error.WriteLine($"[GlbCompressor] STDOUT: {(string.IsNullOrWhiteSpace(stdout) ? "(空)" : stdout.Trim())}");
+            Console.Error.WriteLine($"[GlbCompressor] STDERR: {(string.IsNullOrWhiteSpace(stderr) ? "(空)" : stderr.Trim())}");
+            Console.Error.WriteLine($"[GlbCompressor] 退出码: {process.ExitCode}");
+
             if (process.ExitCode != 0)
             {
                 var detail = string.IsNullOrWhiteSpace(stderr) ? stdout : stderr;
+                var cmdLog = $"命令: {startInfo.FileName} {startInfo.Arguments}";
                 throw new GlbCompressionException(
-                    $"gltf-transform 执行失败（退出码 {process.ExitCode}）：{detail.Trim()}");
+                    $"gltf-transform 执行失败（退出码 {process.ExitCode}）\n{cmdLog}\n输出: {detail.Trim()}");
             }
 
             if (!File.Exists(outputPath))
-                throw new GlbCompressionException(
-                    "压缩命令执行成功，但未生成输出文件。请检查 gltf-transform 版本与权限。");
+                throw new GlbCompressionException("压缩命令执行成功，但未生成输出文件。");
 
             var compressedSize = new FileInfo(outputPath).Length;
 
@@ -243,8 +285,8 @@ namespace GlbCompressorComponent
             GlbCompressionOptions options)
         {
             var args = $"optimize {Quote(inputPath)} {Quote(outputPath)}";
-            if (options.EnableDraco) args += " --compress draco";
-            if (options.CompressTextureToWebP) args += " --texture-compress webp --no-limit-input-pixels";
+            if (options.EnableDraco) args += " --compress draco --allow-net";
+            if (options.CompressTextureToWebP) args += " --texture-compress webp --texture-size 8192 --no-limit-input-pixels";
             return args;
         }
 
@@ -252,15 +294,12 @@ namespace GlbCompressorComponent
         {
             if (!string.IsNullOrWhiteSpace(configured)) return configured;
 
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                var localAppData = Environment.GetFolderPath(
-                    Environment.SpecialFolder.LocalApplicationData);
-                var npmShim = Path.Combine(localAppData, "npm", "gltf-transform.cmd");
-                if (File.Exists(npmShim)) return npmShim;
-                return "gltf-transform.cmd";
-            }
+            // npm 全局安装了 gltf-transform → 用 node + cli.js 直接调用
+            if (NpmCliJsPath.Value != null) return NodeExePath;
 
+            // 回退：Windows 用 .cmd shim，Linux/macOS 用 gltf-transform
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                return "gltf-transform.cmd";
             return "gltf-transform";
         }
 

@@ -1,14 +1,36 @@
 {
-  "version": 4,
+  "version": 3,
   "targets": {
-    "net8.0": {}
+    "net8.0": {
+      "GlbCompressLib/1.0.0": {
+        "type": "project",
+        "framework": ".NETCoreApp,Version=v8.0",
+        "compile": {
+          "bin/placeholder/GlbCompressLib.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/GlbCompressLib.dll": {}
+        },
+        "frameworkReferences": [
+          "Microsoft.AspNetCore.App"
+        ]
+      }
+    }
   },
-  "libraries": {},
+  "libraries": {
+    "GlbCompressLib/1.0.0": {
+      "type": "project",
+      "path": "../../component/backend/GlbCompressLib.csproj",
+      "msbuildProject": "../../component/backend/GlbCompressLib.csproj"
+    }
+  },
   "projectFileDependencyGroups": {
-    "net8.0": []
+    "net8.0": [
+      "GlbCompressLib >= 1.0.0"
+    ]
   },
   "packageFolders": {
-    "C:\\Users\\Neil.Zhen\\.nuget\\packages\\": {},
+    "E:\\3D\\ITL\\compress\\component_demo\\backend\\packages": {},
     "D:\\Application\\VisualStudio\\ShareComponentsAndToolAndSDK\\NuGetPackages": {}
   },
   "project": {
@@ -17,13 +39,14 @@
       "projectUniqueName": "E:\\3D\\ITL\\compress\\component_demo\\backend\\component-demo-backend.csproj",
       "projectName": "component-demo-backend",
       "projectPath": "E:\\3D\\ITL\\compress\\component_demo\\backend\\component-demo-backend.csproj",
-      "packagesPath": "C:\\Users\\Neil.Zhen\\.nuget\\packages\\",
+      "packagesPath": "E:\\3D\\ITL\\compress\\component_demo\\backend\\packages",
       "outputPath": "E:\\3D\\ITL\\compress\\component_demo\\backend\\obj\\",
       "projectStyle": "PackageReference",
       "fallbackFolders": [
         "D:\\Application\\VisualStudio\\ShareComponentsAndToolAndSDK\\NuGetPackages"
       ],
       "configFilePaths": [
+        "E:\\3D\\ITL\\compress\\component_demo\\backend\\NuGet.Config",
         "C:\\Users\\Neil.Zhen\\AppData\\Roaming\\NuGet\\NuGet.Config",
         "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
         "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
@@ -38,9 +61,12 @@
       },
       "frameworks": {
         "net8.0": {
-          "framework": "net8.0",
           "targetAlias": "net8.0",
-          "projectReferences": {}
+          "projectReferences": {
+            "E:\\3D\\ITL\\compress\\component\\backend\\GlbCompressLib.csproj": {
+              "projectPath": "E:\\3D\\ITL\\compress\\component\\backend\\GlbCompressLib.csproj"
+            }
+          }
         }
       },
       "warningProperties": {
@@ -53,11 +79,10 @@
         "auditLevel": "low",
         "auditMode": "direct"
       },
-      "SdkAnalysisLevel": "10.0.300"
+      "SdkAnalysisLevel": "9.0.300"
     },
     "frameworks": {
       "net8.0": {
-        "framework": "net8.0",
         "targetAlias": "net8.0",
         "imports": [
           "net461",
@@ -78,7 +103,7 @@
             "privateAssets": "all"
           }
         },
-        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.300-preview.0.26177.108/PortableRuntimeIdentifierGraph.json"
+        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.313/PortableRuntimeIdentifierGraph.json"
       }
     }
   }

@@ -8,4 +8,29 @@
     <AssemblyName>component-demo-backend</AssemblyName>
   </PropertyGroup>
 
+  <!-- AssimpNet 手动引用（NuGet restore 在当前环境有 Bug） -->
+  <ItemGroup>
+    <Reference Include="AssimpNet">
+      <HintPath>libs\AssimpNet.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+  <!-- 引用 GlbCompressLib 组件库 -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\component\backend\GlbCompressLib.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Assimp 本机库（win-x64），拷贝到输出目录 -->
+    <Content Include="libs\assimp.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>%(FileName)%(Extension)</Link>
+    </Content>
+  </ItemGroup>
+
+  <!-- 构建前自动杀掉残留进程，避免文件锁 -->
+  <Target Name="KillOldProcess" BeforeTargets="BeforeBuild;Build">
+    <Exec Command="taskkill /f /im component-demo-backend.exe >nul 2&gt;nul &amp; exit /b 0" IgnoreExitCode="true" />
+  </Target>
+
 </Project>
