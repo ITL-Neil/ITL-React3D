@@ -3,7 +3,7 @@
 简易前后端分离 Web 应用，用于上传 GLB 文件并调用 `gltf-transform` 执行 Draco 压缩和纹理 WebP 转换。
 
 ## 效果展示
-![alt text](<READMEFILL/Format conversion and compression effect result.jpg>)
+![alt text](<READMEFILE/Format conversion and compression effect result.jpg>)
 
 ## 目录结构
 
