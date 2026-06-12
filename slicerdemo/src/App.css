@@ -1,0 +1,295 @@
+/* ── 全局重置 ── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+/* ── 布局 ── */
+.app-root {
+  display: flex;
+  width: 100vw;
+  height: 100vh;
+  background: #0f1117;
+  color: #e8eaf0;
+}
+
+/* ════ 侧边面板 ════ */
+.side-panel {
+  width: 320px;
+  min-width: 280px;
+  max-width: 340px;
+  height: 100vh;
+  background: linear-gradient(160deg, #1a1d2e 0%, #161929 100%);
+  border-right: 1px solid rgba(255, 255, 255, 0.07);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 18px;
+  overflow-y: auto;
+  box-shadow: 4px 0 24px rgba(0, 0, 0, 0.4);
+  scrollbar-width: thin;
+  scrollbar-color: #2e3254 transparent;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+.panel-icon { font-size: 22px; }
+.panel-header h1 {
+  font-size: 17px;
+  font-weight: 700;
+  color: #c8d6f8;
+  letter-spacing: 0.5px;
+}
+
+/* ── 上传区 ── */
+.upload-zone {
+  border: 2px dashed rgba(100, 120, 200, 0.4);
+  border-radius: 12px;
+  padding: 20px 12px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  background: rgba(255,255,255,0.02);
+}
+.upload-zone:hover, .upload-zone.has-file {
+  border-color: rgba(120, 160, 255, 0.7);
+  background: rgba(100, 140, 255, 0.06);
+}
+.upload-icon { font-size: 28px; display: block; margin-bottom: 8px; }
+.upload-prompt p { font-size: 14px; color: #a0aec0; }
+.upload-prompt small { font-size: 11px; color: #5a6a8a; }
+
+.file-info { display: flex; align-items: center; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.file-icon { font-size: 20px; }
+.file-name { font-size: 13px; color: #c8d6f8; word-break: break-all; max-width: 180px; }
+.file-ok { font-size: 12px; color: #68d391; background: rgba(104, 211, 145, 0.12); padding: 2px 8px; border-radius: 20px; }
+
+/* ── 参数区 ── */
+.param-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.param-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.param-row label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #a0b0d0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.param-badge {
+  background: rgba(100,140,255,0.2);
+  color: #88aaff;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.param-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.param-control input[type="range"] {
+  flex: 1;
+  accent-color: #7b9cff;
+  height: 4px;
+  cursor: pointer;
+}
+.param-value {
+  min-width: 32px;
+  text-align: center;
+  font-size: 15px;
+  font-weight: 700;
+  color: #7ec8e3;
+  background: rgba(126,200,227,0.1);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+.param-row small { font-size: 11px; color: #556080; }
+
+/* ── 计算按钮 ── */
+.compute-btn {
+  width: 100%;
+  padding: 12px 0;
+  border: none;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #4f7fff 0%, #7b4fff 100%);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.2s, transform 0.1s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  letter-spacing: 0.3px;
+}
+.compute-btn:hover:not(.disabled) { opacity: 0.88; transform: translateY(-1px); }
+.compute-btn.disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── 进度条 ── */
+.progress-wrap {
+  position: relative;
+  height: 28px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+}
+.progress-bar {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  background: linear-gradient(90deg, #4f7fff, #7b4fff);
+  border-radius: 8px;
+  transition: width 0.3s ease;
+}
+.progress-wrap span {
+  position: relative;
+  z-index: 1;
+  font-size: 12px;
+  color: #c8d6f8;
+  padding-left: 12px;
+}
+
+/* ── 错误提示 ── */
+.error-box {
+  background: rgba(255, 80, 80, 0.1);
+  border: 1px solid rgba(255, 80, 80, 0.3);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: #fc8181;
+  line-height: 1.6;
+}
+
+/* ── 结果摘要 ── */
+.result-section h3 {
+  font-size: 13px;
+  font-weight: 700;
+  color: #a0b0d0;
+  margin-bottom: 10px;
+}
+.result-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #8090b0;
+  margin-bottom: 12px;
+}
+.result-meta b { color: #c8d6f8; }
+
+.slice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #2e3254 transparent;
+}
+.slice-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.03);
+  transition: background 0.15s;
+}
+.slice-item:hover { background: rgba(255,255,255,0.06); }
+.slice-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.slice-item span:nth-child(2) { flex: 1; color: #a0b0d0; }
+.slice-vol { color: #ffd700; font-weight: 600; }
+
+.panel-footer {
+  margin-top: auto;
+  text-align: center;
+}
+.panel-footer small { font-size: 11px; color: #3a4060; }
+
+/* ════ 视口区 ════ */
+.viewport {
+  flex: 1;
+  height: 100vh;
+  position: relative;
+  background: radial-gradient(ellipse at center, #1a1f35 0%, #0d1020 100%);
+  overflow: hidden;
+}
+
+.viewport-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.viewport-hint {
+  text-align: center;
+  color: #3a4060;
+}
+.viewport-hint span { font-size: 56px; display: block; margin-bottom: 12px; opacity: 0.3; }
+.viewport-hint p { font-size: 14px; }
+
+.demo-tips {
+  position: absolute;
+  bottom: 24px;
+  right: 24px;
+  background: rgba(20, 24, 40, 0.85);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 12px;
+  padding: 16px 20px;
+  font-size: 13px;
+  color: #8090b0;
+  backdrop-filter: blur(8px);
+  max-width: 260px;
+}
+.demo-tips h3 { font-size: 12px; font-weight: 700; color: #a0b0d0; margin-bottom: 10px; }
+.demo-tips ol { padding-left: 16px; line-height: 2; }
+.demo-tips code {
+  background: rgba(100,140,255,0.15);
+  color: #88aaff;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+/* ── 加载旋转 ── */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255,255,255,0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
