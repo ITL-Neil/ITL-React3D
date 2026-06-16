@@ -1,0 +1,962 @@
+/**
+ * Itlmodelviewer — Adapted from coal-slicer's ModelViewer.
+ *
+ * Loads a GLB/GLTF model from a URL and renders it with coal-slicer's visual
+ * style (dark canvas, directional lights, grid, OrbitControls, auto-fit camera).
+ *
+ * When cutN > 0: runs BVH-accelerated equal-volume slicing and renders
+ * color-coded slices with clipping planes.
+ *
+ * Accepts LevaPanel-compatible config props so the settings panel is live.
+ */
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
+import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
+import { Canvas, useThree } from '@react-three/fiber';
+import { OrbitControls, ContactShadows } from '@react-three/drei';
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+import { cpuExactEqualSlices } from './cpuSlicer';
+import type { CutResult } from './cpuSlicer';
+import { autoAlignTopFace, addBottomCap } from './manualAlign';
+
+/* ── BVH monkey-patch (idempotent) ── */
+(THREE.BufferGeometry.prototype as any).computeBoundsTree ??= computeBoundsTree;
+(THREE.BufferGeometry.prototype as any).disposeBoundsTree ??= disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+/* ── Loader singleton ── */
+const loader = new GLTFLoader();
+const dracoLoader = new DRACOLoader();
+dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
+loader.setDRACOLoader(dracoLoader);
+
+/* ═══════════════════════════════════════════
+   Helpers
+═══════════════════════════════════════════ */
+
+function formatVolume(v: number): string {
+  if (v < 1e-6) return `${(v * 1e9).toFixed(2)} mm³`;
+  if (v < 1e-3) return `${(v * 1e6).toFixed(2)} cm³`;
+  if (v < 1) return `${(v * 1e3).toFixed(2)} L`;
+  return `${v.toFixed(4)} m³`;
+}
+
+/* ── Slice HSL color ── */
+function sliceColor(index: number, total: number): THREE.Color {
+  const c = new THREE.Color();
+  c.setHSL(index / total, 0.75, 0.52);
+  return c;
+}
+
+/* ── Accurate bounding box from actual world-space vertices ── */
+function computeSceneBox(scene: THREE.Group) {
+  scene.updateWorldMatrix(true, true);
+  const box = new THREE.Box3();
+  const vec = new THREE.Vector3();
+  let hasVerts = false;
+  scene.traverse((node) => {
+    if (!(node as THREE.Mesh).isMesh || !(node as THREE.Mesh).geometry) return;
+    const mesh = node as THREE.Mesh;
+    if (mesh.name === 'bottom-cap' || mesh.name.startsWith('bottom-cap')) return;
+    const pos = mesh.geometry.attributes.position;
+    if (!pos || pos.count === 0) return;
+    // Sample up to 2000 vertices per mesh, then expand box directly
+    const step = Math.max(1, Math.floor(pos.count / 2000));
+    for (let i = 0; i < pos.count; i += step) {
+      vec.fromBufferAttribute(pos, i);
+      vec.applyMatrix4(mesh.matrixWorld);
+      box.expandByPoint(vec);
+      hasVerts = true;
+    }
+  });
+  if (!hasVerts) return null;
+  console.log('[computeSceneBox] box:', box.min.toArray().map(v => v.toFixed(2)), '→',
+    box.max.toArray().map(v => v.toFixed(2)),
+    '| size:', (box.max.x - box.min.x).toFixed(2), (box.max.y - box.min.y).toFixed(2), (box.max.z - box.min.z).toFixed(2));
+  return box;
+}
+
+/* ── Collect mesh data for sliced rendering ── */
+function collectMeshes(gltfScene: THREE.Group) {
+  const meshes: { geometry: THREE.BufferGeometry; matrixWorld: THREE.Matrix4; name: string }[] = [];
+  gltfScene.updateWorldMatrix(true, true);
+  gltfScene.traverse((node) => {
+    if (!(node as THREE.Mesh).isMesh || !(node as THREE.Mesh).geometry) return;
+    const mesh = node as THREE.Mesh;
+    if (mesh.name === 'bottom-cap' || mesh.name.startsWith('bottom-cap')) return;  // skip sealing cap — flat geometry breaks BVH
+    const geo = mesh.geometry;
+    const pos = geo.attributes.position;
+    if (!pos || pos.count === 0) return;
+    meshes.push({
+      geometry: geo.clone(),
+      matrixWorld: mesh.matrixWorld.clone(),
+      name: mesh.name || 'mesh',
+    });
+  });
+  return meshes;
+}
+
+/* ═══════════════════════════════════════════
+   PCA-based auto-alignment: find the flattest orientation (minimal Y-span),
+   rotate the model so its bottom face is parallel to XZ, then ground at y=0.
+
+   Ported from coal-slicer App.jsx's alignModelToGround.
+   Uses a WRAPPER group so R3F preserves the transform correctly.
+═══════════════════════════════════════════ */
+function alignModelToGround(gltfScene: THREE.Group): THREE.Group {
+  gltfScene.updateWorldMatrix(true, true);
+
+  // ── Collect all world-space vertices from meshes ──
+  const meshList: THREE.Mesh[] = [];
+  gltfScene.traverse((n) => { if ((n as THREE.Mesh).isMesh && (n as THREE.Mesh).geometry) meshList.push(n as THREE.Mesh); });
+  if (meshList.length === 0) {
+    // Fallback: just wrap and shift
+    const box = computeSceneBox(gltfScene);
+    const wrapper = new THREE.Group();
+    wrapper.add(gltfScene);
+    if (box) wrapper.position.y -= box.min.y;
+    return wrapper;
+  }
+
+  const pts: number[] = [];
+  const v = new THREE.Vector3();
+  for (const m of meshList) {
+    const pos = m.geometry.attributes.position;
+    if (!pos) continue;
+    const step = Math.max(1, Math.floor(pos.count / 8000));
+    for (let i = 0; i < pos.count; i += step) {
+      v.fromBufferAttribute(pos, i);
+      v.applyMatrix4(m.matrixWorld);
+      pts.push(v.x, v.y, v.z);
+    }
+  }
+
+  const n = pts.length / 3;
+  if (n < 50) {
+    const box = computeSceneBox(gltfScene);
+    const wrapper = new THREE.Group();
+    wrapper.add(gltfScene);
+    if (box) wrapper.position.y -= box.min.y;
+    return wrapper;
+  }
+
+  // ── Centroid ──
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < pts.length; i += 3) { cx += pts[i]; cy += pts[i + 1]; cz += pts[i + 2]; }
+  cx /= n; cy /= n; cz /= n;
+
+  // ── Covariance matrix ──
+  let cxx = 0, cxy = 0, cxz = 0, cyy = 0, cyz = 0, czz = 0;
+  for (let i = 0; i < pts.length; i += 3) {
+    const dx = pts[i] - cx, dy = pts[i + 1] - cy, dz = pts[i + 2] - cz;
+    cxx += dx * dx; cxy += dx * dy; cxz += dx * dz;
+    cyy += dy * dy; cyz += dy * dz; czz += dz * dz;
+  }
+  cxx /= n; cxy /= n; cxz /= n; cyy /= n; cyz /= n; czz /= n;
+
+  // ── Power iteration for eigenvectors ──
+  const powerIter = (start: THREE.Vector3): THREE.Vector3 => {
+    let vv = start.clone();
+    for (let k = 0; k < 15; k++) {
+      vv.copy(new THREE.Vector3(
+        cxx * vv.x + cxy * vv.y + cxz * vv.z,
+        cxy * vv.x + cyy * vv.y + cyz * vv.z,
+        cxz * vv.x + cyz * vv.y + czz * vv.z,
+      )).normalize();
+    }
+    return vv;
+  };
+  const ev1 = powerIter(new THREE.Vector3(1, 0, 0));
+  const s2 = new THREE.Vector3(0, 1, 0).sub(ev1.clone().multiplyScalar(ev1.dot(new THREE.Vector3(0, 1, 0)))).normalize();
+  const ev2 = powerIter(s2.length() > 0.1 ? s2 : new THREE.Vector3(0, 0, 1));
+  const ev3 = new THREE.Vector3().crossVectors(ev1, ev2).normalize();
+
+  const ray = (vv: THREE.Vector3) => {
+    const x = vv.x, y = vv.y, z = vv.z;
+    return cxx * x * x + cyy * y * y + czz * z * z + 2 * (cxy * x * y + cxz * x * z + cyz * y * z);
+  };
+  const pairs = [{ v: ev1 }, { v: ev2 }, { v: ev3 }];
+  pairs.forEach((p) => { (p as any).val = ray(p.v); });
+  pairs.sort((a: any, b: any) => a.val - b.val);
+
+  // ── Save original world box for verification ──
+  const origBox = computeSceneBox(gltfScene);
+
+  // ── Candidate axes: PCA 3 axes + 6 world axes ──
+  const worldUp = new THREE.Vector3(0, 1, 0);
+  const worldDown = new THREE.Vector3(0, -1, 0);
+  const trialLabels = ['shortest', 'middle', 'longest', '+X', '-X', '+Y', '-Y', '+Z', '-Z'];
+  const allCandidates = [
+    (pairs[0] as any).v.clone() as THREE.Vector3,
+    (pairs[1] as any).v.clone() as THREE.Vector3,
+    (pairs[2] as any).v.clone() as THREE.Vector3,
+    new THREE.Vector3( 1, 0, 0),
+    new THREE.Vector3(-1, 0, 0),
+    new THREE.Vector3( 0, 1, 0),
+    new THREE.Vector3( 0,-1, 0),
+    new THREE.Vector3( 0, 0, 1),
+    new THREE.Vector3( 0, 0,-1),
+  ];
+
+  let bestHeight = Infinity;
+  let bestQuat = new THREE.Quaternion();
+  let bestMinY = 0;
+  let bestLabel = '?';
+
+  // We test on the original scene directly (temporarily mutating its quaternion)
+  // and restore at the end — we'll apply the winner to a WRAPPER group.
+  for (let t = 0; t < allCandidates.length; t++) {
+    const axis = allCandidates[t];
+    const target = axis.dot(worldUp) >= -1e-12 ? worldUp : worldDown;
+    const trialQuat = new THREE.Quaternion().setFromUnitVectors(axis, target);
+
+    gltfScene.quaternion.copy(trialQuat);
+    gltfScene.position.set(0, 0, 0);
+    gltfScene.updateMatrix();
+    gltfScene.updateWorldMatrix(true, true);
+
+    const trialBox = computeSceneBox(gltfScene);
+    if (!trialBox) continue;
+    const h = trialBox.max.y - trialBox.min.y;
+
+    console.log(`[Align] trial #${t} ${trialLabels[t]}: height=${h.toFixed(3)}, minY=${trialBox.min.y.toFixed(4)}, maxY=${trialBox.max.y.toFixed(4)}, axis=[${axis.x.toFixed(3)},${axis.y.toFixed(3)},${axis.z.toFixed(3)}]`);
+
+    if (h < bestHeight) {
+      bestHeight = h;
+      bestQuat.copy(trialQuat);
+      bestMinY = trialBox.min.y;
+      bestLabel = trialLabels[t];
+    }
+  }
+
+  // ── Restore original scene transform ──
+  gltfScene.quaternion.identity();
+  gltfScene.position.set(0, 0, 0);
+  gltfScene.updateMatrix();
+
+  console.log(`[Align] chosen: ${bestLabel}, height=${bestHeight.toFixed(3)}, quat=[${bestQuat.x.toFixed(4)},${bestQuat.y.toFixed(4)},${bestQuat.z.toFixed(4)},${bestQuat.w.toFixed(4)}], origBox minY=${origBox?.min.y.toFixed(4)}`);
+
+  // ── Create wrapper group with alignment transform ──
+  const wrapper = new THREE.Group();
+  wrapper.add(gltfScene);
+  wrapper.quaternion.copy(bestQuat);
+  wrapper.position.set(0, -bestMinY, 0);
+  wrapper.updateMatrix();
+  wrapper.updateWorldMatrix(true, true);
+
+  // ── Verify bottom at y=0 ──
+  const verify = computeSceneBox(wrapper);
+  if (verify) {
+    console.log('[Align] wrapper verify — minY:', verify.min.y.toFixed(4), 'height:', (verify.max.y - verify.min.y).toFixed(3));
+    if (Math.abs(verify.min.y) > 0.01) {
+      wrapper.position.y -= verify.min.y;
+      wrapper.updateMatrix();
+      wrapper.updateWorldMatrix(true, true);
+      const recheck = computeSceneBox(wrapper);
+      console.log('[Align] drift corrected — recheck minY:', recheck?.min.y.toFixed(4));
+    }
+  }
+
+  return wrapper;
+}
+
+/* ═══════════════════════════════════════════
+   Lighting presets
+═══════════════════════════════════════════ */
+interface LightDef {
+  type: 'ambient' | 'directional';
+  color?: string;
+  intensity: number;
+  position?: [number, number, number];
+  castShadow?: boolean;
+}
+
+type PresetName = 'rembrandt' | 'portrait' | 'upfront' | 'soft';
+
+const LIGHTING_PRESETS: Record<PresetName, LightDef[]> = {
+  rembrandt: [
+    { type: 'ambient', intensity: 0.35 },
+    { type: 'directional', position: [8, 12, 4], intensity: 1.6, castShadow: true, color: '#fff3e0' },
+    { type: 'directional', position: [-4, 6, -6], intensity: 0.4, color: '#8899cc' },
+    { type: 'directional', position: [0, -4, 0], intensity: 0.2, color: '#6080ff' },
+  ],
+  portrait: [
+    { type: 'ambient', intensity: 0.5 },
+    { type: 'directional', position: [2, 10, 4], intensity: 1.2, castShadow: true, color: '#ffe8d6' },
+    { type: 'directional', position: [-2, 8, -2], intensity: 0.6, color: '#d6e0ff' },
+    { type: 'directional', position: [0, -3, 0], intensity: 0.15, color: '#6080ff' },
+  ],
+  upfront: [
+    { type: 'ambient', intensity: 0.55 },
+    { type: 'directional', position: [0, 8, 10], intensity: 1.3, castShadow: true, color: '#ffffff' },
+    { type: 'directional', position: [-6, 4, -4], intensity: 0.35, color: '#8899cc' },
+    { type: 'directional', position: [6, 4, -4], intensity: 0.35, color: '#8899cc' },
+  ],
+  soft: [
+    { type: 'ambient', intensity: 0.6 },
+    { type: 'directional', position: [4, 6, 6], intensity: 0.8, castShadow: true, color: '#ffe8d6' },
+    { type: 'directional', position: [-4, 6, -4], intensity: 0.7, color: '#d6e0ff' },
+    { type: 'directional', position: [0, -4, 0], intensity: 0.25, color: '#80a0ff' },
+  ],
+};
+
+/* ═══════════════════════════════════════════
+   Orientation presets
+═══════════════════════════════════════════ */
+function getOrientationAngles(orientation: number): { azimuth: number; elevation: number } {
+  const idx = Math.max(1, Math.min(12, Math.round(orientation))) - 1;
+  const azimuth = (idx / 12) * Math.PI * 2;
+  const elevation = idx % 2 === 0 ? Math.PI / 7 : Math.PI / 4;
+  return { azimuth, elevation };
+}
+
+/* ═══════════════════════════════════════════
+   R3F sub-components
+═══════════════════════════════════════════ */
+
+function SceneBackground({ color }: { color: string }) {
+  useThree(({ scene }) => {
+    scene.background = new THREE.Color(color);
+  });
+  return null;
+}
+
+function SceneSetup() {
+  const { gl } = useThree();
+  useEffect(() => {
+    gl.localClippingEnabled = true;
+  }, [gl]);
+  return null;
+}
+
+function AutoFitCamera({ center, maxDim, orientation }: {
+  center: [number, number, number];
+  maxDim: number;
+  orientation: number;
+}) {
+  const { camera } = useThree();
+  const persp = camera as THREE.PerspectiveCamera;
+  useEffect(() => {
+    if (!center || !maxDim) return;
+    const { azimuth, elevation } = getOrientationAngles(orientation);
+    const dist = (maxDim / 2) / Math.tan(persp.fov * (Math.PI / 180) / 2) * 1.8;
+    const x = center[0] + dist * Math.cos(elevation) * Math.sin(azimuth);
+    const y = center[1] + dist * Math.sin(elevation);
+    const z = center[2] + dist * Math.cos(elevation) * Math.cos(azimuth);
+    persp.position.set(x, y, z);
+    persp.lookAt(center[0], center[1], center[2]);
+    persp.near = Math.max(0.001, dist / 200);
+    persp.far = dist * 20;
+    persp.updateProjectionMatrix();
+  }, [center, maxDim, orientation, persp]);
+  return null;
+}
+
+function LightingRig({ preset, lightIntensity }: { preset: PresetName; lightIntensity: number }) {
+  const lights = LIGHTING_PRESETS[preset] ?? LIGHTING_PRESETS.rembrandt;
+  return (
+    <>
+      {lights.map((l, i) => {
+        const intensity = l.intensity * lightIntensity;
+        if (l.type === 'ambient') {
+          return <ambientLight key={i} intensity={intensity} color={l.color} />;
+        }
+        return (
+          <directionalLight
+            key={i}
+            position={l.position}
+            intensity={intensity}
+            color={l.color}
+            castShadow={l.castShadow}
+            shadow-mapSize={l.castShadow ? [2048, 2048] : undefined}
+          />
+        );
+      })}
+    </>
+  );
+}
+
+/* ── ClippedMesh (per-slice, per-mesh rendering) ── */
+function ClippedMesh({ geometry, worldMatrix, color, clippingPlanes }: {
+  geometry: THREE.BufferGeometry;
+  worldMatrix: THREE.Matrix4;
+  color: THREE.Color;
+  clippingPlanes: THREE.Plane[];
+}) {
+  const decomp = useMemo(() => {
+    const p = new THREE.Vector3();
+    const q = new THREE.Quaternion();
+    const s = new THREE.Vector3();
+    worldMatrix.decompose(p, q, s);
+    return {
+      position: [p.x, p.y, p.z] as [number, number, number],
+      quaternion: [q.x, q.y, q.z, q.w] as [number, number, number, number],
+      scale: [s.x, s.y, s.z] as [number, number, number],
+    };
+  }, [worldMatrix]);
+
+  return (
+    <mesh geometry={geometry} position={decomp.position} quaternion={decomp.quaternion} scale={decomp.scale}>
+      <meshStandardMaterial
+        color={color}
+        roughness={0.45}
+        metalness={0.1}
+        side={THREE.DoubleSide}
+        clippingPlanes={clippingPlanes}
+        clipShadows
+      />
+    </mesh>
+  );
+}
+
+/* ── SlicedModel (original scene rendered with clipping planes) ── */
+function SlicedModel({ scene, cutResult, forceUpdate }: {
+  scene: THREE.Group;
+  cutResult: CutResult;
+  forceUpdate: number;
+}) {
+  const meshData = useMemo(() => {
+    scene.updateWorldMatrix(true, true);
+    console.log('[SlicedModel] scene transform at collect time:',
+      'quat=', [scene.quaternion.x.toFixed(4), scene.quaternion.y.toFixed(4), scene.quaternion.z.toFixed(4), scene.quaternion.w.toFixed(4)],
+      'pos=', [scene.position.x.toFixed(4), scene.position.y.toFixed(4), scene.position.z.toFixed(4)]);
+    const md = collectMeshes(scene);
+    if (md.length > 0) {
+      const first = md[0].matrixWorld;
+      const p = new THREE.Vector3();
+      const q = new THREE.Quaternion();
+      const s = new THREE.Vector3();
+      first.decompose(p, q, s);
+      console.log('[SlicedModel] first mesh world:', 'pos=', p.toArray().map(v => v.toFixed(3)), 'quat=', q.toArray().map(v => v.toFixed(4)));
+    }
+    return md;
+  }, [scene, forceUpdate]);
+  const box = useMemo(() => {
+    scene.updateWorldMatrix(true, true);
+    const b = computeSceneBox(scene);
+    if (b) {
+      console.log('[SlicedModel] world box:', {
+        min: b.min.toArray().map(v => v.toFixed(3)),
+        max: b.max.toArray().map(v => v.toFixed(3)),
+        size: new THREE.Vector3().subVectors(b.max, b.min).toArray().map(v => v.toFixed(3)),
+      });
+    }
+    return b;
+  }, [scene, forceUpdate]);
+
+  const { axis, cutPlanes } = cutResult;
+  const totalSlices = cutPlanes.length + 1;
+
+  // Camera params
+  const camParams = useMemo(() => {
+    if (!box) return null;
+    const c = new THREE.Vector3();
+    box.getCenter(c);
+    const s = new THREE.Vector3();
+    box.getSize(s);
+    return { center: [c.x, c.y, c.z] as [number, number, number], maxDim: Math.max(s.x, s.y, s.z) };
+  }, [box]);
+
+  // Precompute clipping planes for each slice
+  const sliceClipPlanes = useMemo(() => {
+    const result: THREE.Plane[][] = [];
+    for (let si = 0; si < totalSlices; si++) {
+      const planes: THREE.Plane[] = [];
+      const minB = si === 0 ? -Infinity : cutPlanes[si - 1];
+      const maxB = si === totalSlices - 1 ? Infinity : cutPlanes[si];
+
+      if (isFinite(minB)) {
+        if (axis === 'x') planes.push(new THREE.Plane(new THREE.Vector3(1, 0, 0), -minB));
+        else if (axis === 'z') planes.push(new THREE.Plane(new THREE.Vector3(0, 0, 1), -minB));
+        else planes.push(new THREE.Plane(new THREE.Vector3(0, 1, 0), -minB));
+      }
+      if (isFinite(maxB)) {
+        if (axis === 'x') planes.push(new THREE.Plane(new THREE.Vector3(-1, 0, 0), maxB));
+        else if (axis === 'z') planes.push(new THREE.Plane(new THREE.Vector3(0, 0, -1), maxB));
+        else planes.push(new THREE.Plane(new THREE.Vector3(0, -1, 0), maxB));
+      }
+      result.push(planes);
+    }
+    console.log('[SlicedModel] clipPlanes for', totalSlices, 'slices — axis:', axis, 'cutPlanes:', cutPlanes.map(c => c.toFixed(3)));
+    return result;
+  }, [totalSlices, cutPlanes, axis]);
+
+  if (sliceClipPlanes.length === 0 || meshData.length === 0) return null;
+
+  return (
+    <group>
+      {sliceClipPlanes.map((planes, sliceIndex) => {
+        const color = sliceColor(sliceIndex, totalSlices);
+        return (
+          <group key={sliceIndex}>
+            {meshData.map((md, mi) => (
+              <ClippedMesh
+                key={`${sliceIndex}-${mi}`}
+                geometry={md.geometry}
+                worldMatrix={md.matrixWorld}
+                color={color}
+                clippingPlanes={planes}
+              />
+            ))}
+          </group>
+        );
+      })}
+      {camParams && <AutoFitCamera center={camParams.center} maxDim={camParams.maxDim} orientation={4} />}
+    </group>
+  );
+}
+
+/* ── OriginalModel (un-cut preview) ── */
+function OriginalModel({ scene, orientation, forceUpdate }: { scene: THREE.Group; orientation: number; forceUpdate: number }) {
+  // Clone to avoid mutating the original scene's materials (matching coal-slicer's approach)
+  // Include forceUpdate in deps so the clone captures the latest wrapper transform after manual align
+  const cloned = useMemo(() => scene.clone(), [scene, forceUpdate]);
+
+  useEffect(() => {
+    cloned.traverse((node) => {
+      if (!(node as THREE.Mesh).isMesh || !(node as THREE.Mesh).material) return;
+      const mat = (node as THREE.Mesh).material;
+      const setProps = (m: THREE.Material) => {
+        if ('color' in m && m.color instanceof THREE.Color) m.color.set('#7090c0');
+        if ('roughness' in m) (m as THREE.MeshStandardMaterial).roughness = 0.5;
+      };
+      if (Array.isArray(mat)) mat.forEach(setProps);
+      else setProps(mat);
+    });
+  }, [cloned]);
+
+  const camParams = useMemo(() => {
+    const b = computeSceneBox(cloned);
+    if (!b) return null;
+    const c = new THREE.Vector3();
+    b.getCenter(c);
+    const s = new THREE.Vector3();
+    b.getSize(s);
+    return { center: [c.x, c.y, c.z] as [number, number, number], maxDim: Math.max(s.x, s.y, s.z) };
+  }, [cloned]);
+
+  return (
+    <>
+      <primitive object={cloned} />
+      {camParams && <AutoFitCamera center={camParams.center} maxDim={camParams.maxDim} orientation={orientation} />}
+    </>
+  );
+}
+
+/* ═══════════════════════════════════════════
+   Props
+═══════════════════════════════════════════ */
+export interface ModelViewerConfig {
+  shadows: boolean;
+  contactShadow: boolean;
+  lightIntensity: number;
+  preset: string;
+  background: string;
+  orientation: number;
+  autoRotate: boolean;
+  canRotate: boolean;
+  canDrag: boolean;
+  cutN: number;
+  cutR: number;
+}
+
+interface ModelViewerProps {
+  modelUrl: string;
+  config: ModelViewerConfig;
+  style?: React.CSSProperties;
+}
+
+/* ═══════════════════════════════════════════
+   Data panel dimensions
+═══════════════════════════════════════════ */
+
+function useSceneDimensions(
+  scene: THREE.Group | null,
+  forceUpdate: number,
+  alignTick: number,
+) {
+  const [dims, setDims] = useState<{ length: string; width: string; height: string } | null>(null);
+
+  useEffect(() => {
+    if (!scene) { setDims(null); return; }
+    // Force fresh world matrix read — scene's internal quat/pos change after autoAlignTopFace
+    scene.updateWorldMatrix(true, true);
+    const box = computeSceneBox(scene);
+    if (!box) { setDims(null); return; }
+    const sx = box.max.x - box.min.x;
+    const sy = box.max.y - box.min.y;
+    const sz = box.max.z - box.min.z;
+    const length = sx >= sz ? sx : sz;
+    const width = sx >= sz ? sz : sx;
+    console.log('[Dimensions] L:', length.toFixed(2), 'W:', width.toFixed(2), 'H:', sy.toFixed(2),
+      '— box:', box.min.x.toFixed(2), box.min.y.toFixed(2), box.min.z.toFixed(2),
+      '→', box.max.x.toFixed(2), box.max.y.toFixed(2), box.max.z.toFixed(2),
+      '| tick:', alignTick, 'force:', forceUpdate);
+    setDims({
+      length: length.toFixed(2),
+      width: width.toFixed(2),
+      height: sy.toFixed(2),
+    });
+  }, [scene, forceUpdate, alignTick]);
+
+  return dims;
+}
+
+/* ═══════════════════════════════════════════
+   Exported component
+═══════════════════════════════════════════ */
+export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerProps) {
+  const [scene, setScene] = useState<THREE.Group | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [computing, setComputing] = useState(false);
+  const [cutResult, setCutResult] = useState<CutResult | null>(null);
+  const [alignTick, setAlignTick] = useState(0);
+  const [forceUpdate, setForceUpdate] = useState(0); // force R3F to re-read scene transforms
+  const prevUrlRef = useRef<string | null>(null);
+  const computingRef = useRef(false);
+  const sceneRef = useRef<THREE.Group | null>(null);
+
+  // Keep sceneRef in sync
+  useEffect(() => { sceneRef.current = scene; }, [scene]);
+
+  const dimensions = useSceneDimensions(scene, forceUpdate, alignTick);
+
+  /* ── Init MeshoptDecoder ── */
+  useEffect(() => {
+    loader.setMeshoptDecoder(MeshoptDecoder);
+    MeshoptDecoder.ready
+      .then(() => console.log('[Itlmodelviewer] MeshoptDecoder WASM ready'))
+      .catch((err: Error) => console.warn('[Itlmodelviewer] MeshoptDecoder WASM failed:', err.message));
+  }, []);
+
+  /* ── Load model from URL ── */
+  useEffect(() => {
+    if (!modelUrl || modelUrl === prevUrlRef.current) return;
+    prevUrlRef.current = modelUrl;
+    setLoading(true);
+    setError(null);
+    setScene(null);
+    setCutResult(null);
+
+    loader.load(
+      modelUrl,
+      (gltf) => {
+        const aligned = alignModelToGround(gltf.scene);
+        // aligned is the wrapper Group containing gltf.scene as a child.
+        // Store the wrapper as the scene so R3F renders the entire aligned group.
+        setScene(aligned);
+        setLoading(false);
+      },
+      undefined,
+      (err: unknown) => {
+        console.error('[Itlmodelviewer] load error:', err);
+        setError(err instanceof Error ? err.message : String(err));
+        setLoading(false);
+      },
+    );
+  }, [modelUrl]);
+
+  /* ── Slice computation (when cutN > 0 and model is loaded) ── */
+  useEffect(() => {
+    const N = config.cutN;
+    const R = config.cutR;
+
+    if (!scene || N <= 0) {
+      setCutResult(null);
+      return;
+    }
+
+    computingRef.current = true;
+    setComputing(true);
+
+    const timer = setTimeout(() => {
+      if (!computingRef.current) return;
+      try {
+        // CRITICAL: ensure world matrices reflect latest alignment (autoAlignTopFace mutates in-place)
+        scene.updateWorldMatrix(true, true);
+        console.log('[Slice] recomputing — alignTick:', alignTick,
+          'scene quat:', scene.quaternion.x.toFixed(4), scene.quaternion.y.toFixed(4),
+          scene.quaternion.z.toFixed(4), scene.quaternion.w.toFixed(4));
+        const result = cpuExactEqualSlices(scene, N, R);
+        if (result) {
+          console.log('[Slice] result — box:',
+            result.boxMin.map(v => v.toFixed(2)), '→',
+            result.boxMax.map(v => v.toFixed(2)),
+            '| axis:', result.axis, '| totalVol:', result.totalVolume.toFixed(4));
+          setCutResult(result);
+        }
+      } catch (err) {
+        console.error('[Itlmodelviewer] slice error:', err);
+      } finally {
+        setComputing(false);
+        computingRef.current = false;
+      }
+    }, 30);
+
+    return () => {
+      computingRef.current = false;
+      clearTimeout(timer);
+    };
+  }, [scene, config.cutN, config.cutR, alignTick]);
+
+  const preset = (config.preset in LIGHTING_PRESETS ? config.preset : 'rembrandt') as PresetName;
+  const showSlice = config.cutN > 0 && cutResult && !computing && !loading;
+
+  return (
+    <div style={{ width: '100%', height: '100%', position: 'relative', ...style }}>
+      <Canvas
+        shadows={config.shadows}
+        camera={{ fov: 45, near: 0.01, far: 10000, position: [5, 5, 5] }}
+        gl={{ antialias: true }}
+      >
+        <SceneSetup />
+        <SceneBackground color={config.background} />
+        <LightingRig preset={preset} lightIntensity={config.lightIntensity} />
+
+        {/* Show sliced model when cutN > 0 and result is available */}
+        {showSlice && scene && (
+          <SlicedModel key={`slice-${forceUpdate}`} scene={scene} cutResult={cutResult!} forceUpdate={forceUpdate} />
+        )}
+
+        {/* Show original model when cutN === 0 */}
+        {!showSlice && scene && !computing && (
+          <OriginalModel key={`orig-${forceUpdate}`} scene={scene} orientation={config.orientation} forceUpdate={forceUpdate} />
+        )}
+
+        {config.contactShadow && (
+          <ContactShadows position={[0, -0.01, 0]} opacity={0.5} scale={10} blur={2.5} far={10} />
+        )}
+
+        <gridHelper args={[200, 80, '#1e2540', '#1a2035']} position={[0, 0, 0]} />
+
+        <OrbitControls
+          makeDefault
+          enableDamping
+          dampingFactor={0.06}
+          autoRotate={config.autoRotate}
+          enableRotate={config.canRotate}
+          enablePan={config.canDrag}
+        />
+      </Canvas>
+
+      {/* ═══ Overlays ═══ */}
+
+      {/* Loading overlay */}
+      {loading && (
+        <div style={{
+          position: 'absolute', inset: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'radial-gradient(ellipse at center, #1a1f35 0%, #0d1020 100%)',
+          zIndex: 10,
+        }}>
+          <div style={{
+            width: 44, height: 44,
+            border: '3px solid rgba(100,140,255,0.2)',
+            borderTopColor: '#4f7fff',
+            borderRadius: '50%',
+            animation: 'spin 800ms linear infinite',
+          }} />
+        </div>
+      )}
+
+      {/* Computing overlay */}
+      {computing && !loading && (
+        <div style={{
+          position: 'absolute', top: 16, left: '50%', transform: 'translateX(-50%)',
+          background: 'rgba(12, 14, 28, 0.9)', color: '#c8d6f8',
+          padding: '10px 24px', borderRadius: 12, fontSize: 13,
+          border: '1px solid rgba(127, 156, 255, 0.25)',
+          backdropFilter: 'blur(10px)', zIndex: 20,
+          display: 'flex', alignItems: 'center', gap: 10,
+        }}>
+          <div style={{
+            width: 16, height: 16,
+            border: '2px solid rgba(100,140,255,0.3)',
+            borderTopColor: '#4f7fff',
+            borderRadius: '50%',
+            animation: 'spin 800ms linear infinite',
+          }} />
+          等体积切割计算中…
+        </div>
+      )}
+
+      {/* Manual top-face align button — always visible when scene is loaded */}
+      {scene && !loading && (
+        <div style={{
+          position: 'absolute', bottom: 20, left: '50%', transform: 'translateX(-50%)',
+          zIndex: 15, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
+        }}>
+          <button
+            onClick={() => {
+              const s = sceneRef.current;
+              if (!s) return;
+
+              // 1. 先补充底层水平面（XZ 凸包，帮助后续找底面）
+              addBottomCap(s);
+
+              // 2. 底面矫正（封底面会被移除后重建）
+              autoAlignTopFace(s, true);
+
+              // 3. autoAlignTopFace 内部已重建封底面，无需再次调用 addBottomCap
+
+              // 4. 触发 React 重渲染
+              setScene(s);
+              setForceUpdate(t => t + 1);
+              setAlignTick(t => t + 1);
+            }}
+            style={{
+              background: 'rgba(12, 14, 28, 0.9)',
+              border: '1px solid rgba(127, 156, 255, 0.35)',
+              borderRadius: 10,
+              color: '#a0c0ff',
+              fontSize: 12,
+              padding: '8px 20px',
+              cursor: 'pointer',
+              backdropFilter: 'blur(10px)',
+              boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+              transition: 'all 0.2s',
+            }}
+            onMouseEnter={e => {
+              e.currentTarget.style.borderColor = 'rgba(127, 156, 255, 0.7)';
+              e.currentTarget.style.color = '#c8d6f8';
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.borderColor = 'rgba(127, 156, 255, 0.35)';
+              e.currentTarget.style.color = '#a0c0ff';
+            }}
+          >
+            📐 自动找顶面
+          </button>
+          <span style={{ fontSize: 10, color: 'rgba(160, 192, 255, 0.4)', maxWidth: 200, textAlign: 'center', lineHeight: 1.3 }}>
+            自动寻找俯视图投影面积最大的面作为顶面
+          </span>
+        </div>
+      )}
+
+      {/* Error overlay */}
+      {error && (
+        <div style={{
+          position: 'absolute', inset: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'radial-gradient(ellipse at center, #1a1f35 0%, #0d1020 100%)',
+          zIndex: 10,
+        }}>
+          <div style={{ color: '#fc8181', textAlign: 'center', padding: 24 }}>
+            <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>Model Load Error</div>
+            <div style={{ fontSize: 13, opacity: 0.8 }}>{error}</div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══ Data panel — left side ═══ */}
+      {(scene && !loading) && (
+        <div style={{
+          position: 'absolute', top: 16, left: 16,
+          background: 'rgba(12, 14, 28, 0.9)',
+          border: '1px solid rgba(127, 156, 255, 0.2)',
+          borderRadius: 12, padding: '14px 18px',
+          color: '#a0b0d0', fontSize: 12,
+          backdropFilter: 'blur(10px)',
+          boxShadow: '0 6px 24px rgba(0,0,0,0.5)',
+          zIndex: 5,
+          minWidth: 210,
+          maxWidth: 280,
+          lineHeight: 1.8,
+          pointerEvents: 'auto',
+        }}>
+          {/* Header */}
+          <div style={{ fontWeight: 700, fontSize: 13, color: '#c8d6f8', marginBottom: 8, borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: 6 }}>
+            ⛏️ 模型数据
+          </div>
+
+          {/* Dimensions */}
+          {dimensions && (
+            <div style={{ marginBottom: 6 }}>
+              <div style={{ color: '#556080', fontSize: 10, marginBottom: 2 }}>📐 尺寸</div>
+              <div style={{ color: '#e8eaf0', fontWeight: 600, fontSize: 13 }}>
+                长 {dimensions.length} × 宽 {dimensions.width} × 高 {dimensions.height}
+              </div>
+            </div>
+          )}
+
+          {/* Slice params (when cutN > 0) */}
+          {config.cutN > 0 && (
+            <div style={{ marginBottom: 6 }}>
+              <div style={{ color: '#556080', fontSize: 10, marginBottom: 2 }}>⚙️ 切割参数</div>
+              <div style={{ color: '#8090b0' }}>
+                N = <span style={{ color: '#7ec8e3', fontWeight: 600 }}>{config.cutN}</span>
+                {' | '}
+                R = <span style={{ color: '#7ec8e3', fontWeight: 600 }}>{config.cutR}</span>
+              </div>
+            </div>
+          )}
+
+          {/* Slice results */}
+          {cutResult && showSlice && (
+            <>
+              <div style={{ fontWeight: 700, fontSize: 13, color: '#c8d6f8', marginTop: 10, marginBottom: 6, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 6 }}>
+                📊 切割结果
+              </div>
+              <div style={{ color: '#8090b0', marginBottom: 4 }}>
+                总体积：<span style={{ color: '#ffd700', fontWeight: 600 }}>{formatVolume(cutResult.totalVolume)}</span>
+              </div>
+              <div style={{ color: '#8090b0', marginBottom: 6 }}>
+                切割轴：<span style={{ color: '#a0c0ff', fontWeight: 600 }}>{cutResult.axis.toUpperCase()} 轴</span>
+                {' · '}{cutResult.cutPlanes.length} 刀 → {cutResult.sliceVolumes.length} 块
+              </div>
+
+              {/* Per-slice list */}
+              <div style={{
+                maxHeight: 200, overflowY: 'auto',
+                scrollbarWidth: 'thin', scrollbarColor: '#2e3254 transparent',
+                display: 'flex', flexDirection: 'column', gap: 3,
+              }}>
+                {cutResult.sliceVolumes.map((vol, i) => {
+                  const total = cutResult.sliceVolumes.length;
+                  const dotColor = `hsl(${(i / total) * 360}, 75%, 52%)`;
+                  return (
+                    <div key={i} style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '3px 6px', borderRadius: 6,
+                      background: 'rgba(255,255,255,0.03)',
+                      fontSize: 11,
+                    }}>
+                      <span style={{
+                        width: 10, height: 10, borderRadius: '50%',
+                        background: dotColor, flexShrink: 0,
+                      }} />
+                      <span style={{ flex: 1, color: '#a0b0d0' }}>第 {i + 1} 块</span>
+                      <span style={{ color: '#ffd700', fontWeight: 600, fontSize: 11 }}>
+                        {formatVolume(vol)}
+                      </span>
+                      <span style={{ color: '#6070a0', fontSize: 10, minWidth: 36, textAlign: 'right' }}>
+                        {cutResult.slicePercentages[i]}%
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {/* Hint when cutN > 0 but no result yet / computing */}
+          {config.cutN > 0 && !cutResult && computing && (
+            <div style={{ color: '#556080', fontSize: 11, marginTop: 6 }}>
+              正在计算等体积切割…
+            </div>
+          )}
+
+          {/* Hint when cutN === 0 */}
+          {config.cutN === 0 && (
+            <div style={{ color: '#3a4060', fontSize: 11, marginTop: 6 }}>
+              设置 cutN &gt; 0 以启用等体积切割
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}

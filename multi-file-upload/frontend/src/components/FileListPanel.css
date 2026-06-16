@@ -1,0 +1,348 @@
+/* ════════════════════════════════════════════════════════════════════════
+   FileListPanel.css — Multi-file upload panel styles
+   ════════════════════════════════════════════════════════════════════════ */
+
+.file-list-panel {
+  width: 100%;
+  max-width: 620px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  animation: fileListFadeIn 300ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+@keyframes fileListFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Section Headers ── */
+.flp-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #5f6368;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.flp-section-title .flp-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  background: #5f6368;
+}
+
+/* ── Cards ── */
+.flp-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: #f8f9fa;
+  border: 1px solid #e8eaed;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.flp-card:hover {
+  border-color: #c4c7cc;
+}
+
+/* Main file card */
+.flp-card-main {
+  border-color: #1A73E8;
+  border-width: 2px;
+  background: linear-gradient(135deg, #e8f0fe 0%, #f0f4ff 100%);
+  box-shadow: 0 1px 6px rgba(26, 115, 232, 0.12);
+}
+
+.flp-card-main:hover {
+  border-color: #1557b0;
+  box-shadow: 0 2px 10px rgba(26, 115, 232, 0.18);
+}
+
+/* ── Card Icon ── */
+.flp-card-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 16px;
+}
+
+.flp-icon-model {
+  background: #e8f0fe;
+  color: #1A73E8;
+}
+
+.flp-icon-texture {
+  background: #e6f4ea;
+  color: #1e8e3e;
+}
+
+.flp-icon-material {
+  background: #fce8e6;
+  color: #ea4335;
+}
+
+.flp-icon-data {
+  background: #fef7e0;
+  color: #f9ab00;
+}
+
+.flp-icon-unknown {
+  background: #f1f3f4;
+  color: #80868b;
+}
+
+/* ── Card Info ── */
+.flp-card-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.flp-card-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #202124;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.flp-card-meta {
+  font-size: 11px;
+  color: #5f6368;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.flp-card-meta-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #dadce0;
+}
+
+/* ── Card Status (right side) ── */
+.flp-card-status {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border-radius: 12px;
+}
+
+.flp-status-main {
+  background: #e8f0fe;
+  color: #1A73E8;
+}
+
+.flp-status-ok {
+  background: #e6f4ea;
+  color: #1e8e3e;
+}
+
+.flp-status-warn {
+  background: #fef7e0;
+  color: #e37400;
+}
+
+/* ── Warnings / Info Boxes ── */
+.flp-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.flp-warn-item,
+.flp-info-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.flp-warn-item {
+  background: #fef7e0;
+  border: 1px solid #feefc3;
+  color: #5f4b00;
+}
+
+.flp-info-item {
+  background: #e8f0fe;
+  border: 1px solid #d2e3fc;
+  color: #174ea6;
+}
+
+.flp-warn-icon,
+.flp-info-icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+  font-size: 14px;
+}
+
+/* ── Actions Row ── */
+.flp-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  position: sticky;
+  bottom: 0;
+  background: var(--c-bg, #ffffff);
+  padding-top: 12px;
+  padding-bottom: 4px;
+  border-top: 1px solid transparent;
+  z-index: 10;
+}
+
+.flp-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 20px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  transition: all 200ms cubic-bezier(0.2, 0, 0, 1);
+  white-space: nowrap;
+}
+
+.flp-btn-back {
+  background: transparent;
+  color: #5f6368;
+  border: 1px solid #dadce0;
+}
+
+.flp-btn-back:hover {
+  background: #f1f3f4;
+  color: #202124;
+}
+
+.flp-btn-convert {
+  background: #1A73E8;
+  color: #fff;
+}
+
+.flp-btn-convert:hover {
+  background: #1557b0;
+  box-shadow: 0 2px 8px rgba(26, 115, 232, 0.3);
+}
+
+.flp-btn-convert:disabled {
+  background: #dadce0;
+  color: #80868b;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* ── Empty State ── */
+.flp-empty {
+  text-align: center;
+  padding: 32px 16px;
+  color: #5f6368;
+  font-size: 14px;
+}
+
+/* ── Aux Files Grid ── */
+.flp-aux-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.flp-aux-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 500;
+  background: #f1f3f4;
+  color: #3c4043;
+}
+
+.flp-aux-chip-icon {
+  font-size: 14px;
+}
+
+/* ── Scrollable Areas (for many files) ── */
+.flp-scroll-area {
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: #dadce0 transparent;
+}
+
+.flp-scroll-area::-webkit-scrollbar {
+  width: 6px;
+}
+
+.flp-scroll-area::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.flp-scroll-area::-webkit-scrollbar-thumb {
+  background: #dadce0;
+  border-radius: 3px;
+}
+
+.flp-scroll-area::-webkit-scrollbar-thumb:hover {
+  background: #bdc1c6;
+}
+
+.flp-scroll-main {
+  max-height: 240px;
+}
+
+.flp-scroll-aux {
+  max-height: 160px;
+}
+
+.flp-scroll-unknown {
+  max-height: 120px;
+}
+
+/* ── Responsive ── */
+@media (max-width: 480px) {
+  .flp-card {
+    flex-wrap: wrap;
+  }
+  .flp-card-status {
+    margin-left: 48px;
+  }
+  .flp-actions {
+    flex-direction: column;
+  }
+  .flp-btn {
+    justify-content: center;
+  }
+}

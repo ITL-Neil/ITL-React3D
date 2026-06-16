@@ -9,7 +9,6 @@
 3. Use the component
 4. npm run dev
 ---
-   (下面为AI生成)
 
 ## 📦 组件简介
 
