@@ -37,7 +37,7 @@ export interface LevaConfig {
 }
 
 export const DEFAULT_CONFIG: LevaConfig = {
-  autoRotate: true,
+  autoRotate: false,
   contactShadow: true,
   lightIntensity: 1.0,
   preset: 'rembrandt',

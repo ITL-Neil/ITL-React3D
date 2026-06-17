@@ -12,6 +12,7 @@ import * as THREE from 'three';
 export interface CutResult {
   cutPlanes: number[];
   axis: string;
+  sliceNormal?: [number, number, number]; // non-null when slicing parallel to pre-cut plane
   sliceVolumes: number[];
   slicePercentages: number[];
   totalVolume: number;
@@ -26,33 +27,21 @@ export interface CutResult {
   _voxelSize: number;
 }
 
+const UP = new THREE.Vector3(0, 1, 0);
+
 export function cpuExactEqualSlices(
   scene: THREE.Object3D,
   N: number,
   R = 96,
+  preClipPlane?: THREE.Plane | null,
+  sliceNormal?: THREE.Vector3 | null,
 ): CutResult | null {
   const box = new THREE.Box3().setFromObject(scene);
   if (box.isEmpty()) return null;
 
-  const size = new THREE.Vector3();
-  box.getSize(size);
-  const voxelSize = Math.max(size.x, size.y, size.z) / R;
+  const hasPreCut = !!preClipPlane;
 
-  // 实际各轴体素数（保持体素为正方体，确保精度一致）
-  const resX = Math.ceil(size.x / voxelSize);
-  const resY = Math.ceil(size.y / voxelSize);
-  const resZ = Math.ceil(size.z / voxelSize);
-
-  // 确定切割轴（最长水平轴）
-  const axi = size.x >= size.z ? 0 : 2;
-  const axis = axi === 0 ? 'x' : 'z';
-  const cutAxisRes = axi === 0 ? resX : resZ;
-  const perpI = axi === 0 ? 1 : 0;
-  const perpJ = axi === 0 ? 2 : 1;
-  const perpResI = axi === 0 ? resY : resX;
-  const perpResJ = axi === 0 ? resZ : resY;
-
-  // 1. 构建 BVH（一次性开销，纯CPU加速的关键）
+  // 1. 构建 BVH
   const meshList: THREE.Mesh[] = [];
   scene.traverse((node) => {
     if ((node as THREE.Mesh).isMesh && (node as THREE.Mesh).geometry) {
@@ -62,14 +51,34 @@ export function cpuExactEqualSlices(
       meshList.push(mesh);
     }
   });
-
   if (meshList.length === 0) return null;
 
-  // 2. 精确体素化 + 边界解析补偿 → 生成沿切割轴的 1D 体积分布
+  // Determine whether to use rotated (parallel-to-pre-cut) or axis-aligned slicing
+  const useRotated = sliceNormal && !isAxisAligned(sliceNormal);
+
+  if (useRotated) {
+    return computeRotatedSlices(box, meshList, N, R, preClipPlane, sliceNormal, hasPreCut);
+  }
+
+  // === Axis-aligned path (original) ===
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  const voxelSize = Math.max(size.x, size.y, size.z) / R;
+  const resX = Math.ceil(size.x / voxelSize);
+  const resY = Math.ceil(size.y / voxelSize);
+  const resZ = Math.ceil(size.z / voxelSize);
+
+  const axi = size.x >= size.z ? 0 : 2;
+  const axis = axi === 0 ? 'x' : 'z';
+  const cutAxisRes = axi === 0 ? resX : resZ;
+  const perpI = axi === 0 ? 1 : 0;
+  const perpJ = axi === 0 ? 2 : 1;
+  const perpResI = axi === 0 ? resY : resX;
+  const perpResJ = axi === 0 ? resZ : resY;
+
   const columnVolumes = new Float64Array(cutAxisRes);
   const baseVol = voxelSize * voxelSize * voxelSize;
 
-  // 预分配复用对象，零 GC
   const rayOrigin = new THREE.Vector3();
   const rayDir = new THREE.Vector3().setComponent(axi, 1);
   const raycaster = new THREE.Raycaster();
@@ -78,80 +87,238 @@ export function cpuExactEqualSlices(
     const valI = box.min.getComponent(perpI) + (ip1 + 0.5) * voxelSize;
     for (let ip2 = 0; ip2 < perpResJ; ip2++) {
       const valJ = box.min.getComponent(perpJ) + (ip2 + 0.5) * voxelSize;
-
-      // 沿切割轴发射单条射线，获取所有精确交点
       rayOrigin.setComponent(axi, box.min.getComponent(axi) - voxelSize);
       rayOrigin.setComponent(perpI, valI);
       rayOrigin.setComponent(perpJ, valJ);
-
       raycaster.set(rayOrigin, rayDir);
-      raycaster.firstHitOnly = false; // 必须获取所有交点
+      raycaster.firstHitOnly = false;
 
       let allHits: number[] = [];
       for (const mesh of meshList) {
         const hits = raycaster.intersectObject(mesh, false);
         for (let h = 0; h < hits.length; h++) allHits.push(hits[h].distance);
       }
-
       if (allHits.length < 2) continue;
       allHits.sort((a, b) => a - b);
 
-      // 配对交点，精确分配到对应 column
       for (let k = 0; k < allHits.length - 1; k += 2) {
         const enterDist = allHits[k];
         const exitDist = allHits[k + 1];
-
         const startCol = Math.max(0, Math.floor(enterDist / voxelSize));
         const endCol = Math.min(cutAxisRes - 1, Math.floor(exitDist / voxelSize));
-
         for (let c = startCol; c <= endCol; c++) {
           const colWorldStart = c * voxelSize;
           const colWorldEnd = (c + 1) * voxelSize;
-
-          // 计算该体素内射线穿过的精确长度
           const segStart = Math.max(enterDist, colWorldStart);
           const segEnd = Math.min(exitDist, colWorldEnd);
           const len = Math.max(0, segEnd - segStart);
-
           const fraction = len / voxelSize;
+
+          if (hasPreCut) {
+            const voxelCenter = new THREE.Vector3();
+            voxelCenter.setComponent(axi, box.min.getComponent(axi) + colWorldStart + voxelSize * 0.5);
+            voxelCenter.setComponent(perpI, valI);
+            voxelCenter.setComponent(perpJ, valJ);
+            if (preClipPlane!.distanceToPoint(voxelCenter) >= 0) continue;
+          }
           columnVolumes[c] += baseVol * fraction;
         }
       }
     }
   }
 
-  // 3. 构建 CDF（前缀和）
+  return buildCutResult(
+    columnVolumes, cutAxisRes, box, axis, axi, size, voxelSize, N,
+  );
+}
+
+// ── Rotated-coordinate voxelization (slice planes parallel to pre-cut) ──
+
+function computeRotatedSlices(
+  box: THREE.Box3,
+  meshList: THREE.Mesh[],
+  N: number,
+  R: number,
+  preClipPlane: THREE.Plane | undefined | null,
+  normalDir: THREE.Vector3,
+  hasPreCut: boolean,
+): CutResult | null {
+  // perpXZ: in XZ plane, perpendicular to normalDir
+  const perpXZ = new THREE.Vector3().crossVectors(normalDir, UP).normalize();
+
+  // Project 8 box corners onto the rotated basis {normalDir, Y, perpXZ}
+  const corners = [
+    new THREE.Vector3(box.min.x, box.min.y, box.min.z),
+    new THREE.Vector3(box.min.x, box.min.y, box.max.z),
+    new THREE.Vector3(box.min.x, box.max.y, box.min.z),
+    new THREE.Vector3(box.min.x, box.max.y, box.max.z),
+    new THREE.Vector3(box.max.x, box.min.y, box.min.z),
+    new THREE.Vector3(box.max.x, box.min.y, box.max.z),
+    new THREE.Vector3(box.max.x, box.max.y, box.min.z),
+    new THREE.Vector3(box.max.x, box.max.y, box.max.z),
+  ];
+
+  let nMin = Infinity, nMax = -Infinity;
+  let yMin = Infinity, yMax = -Infinity;
+  let pMin = Infinity, pMax = -Infinity;
+  for (const c of corners) {
+    const nd = normalDir.dot(c);
+    const yd = c.y;
+    const pd = perpXZ.dot(c);
+    if (nd < nMin) nMin = nd; if (nd > nMax) nMax = nd;
+    if (yd < yMin) yMin = yd; if (yd > yMax) yMax = yd;
+    if (pd < pMin) pMin = pd; if (pd > pMax) pMax = pd;
+  }
+
+  const nLen = nMax - nMin;
+  const yLen = yMax - yMin;
+  const pLen = pMax - pMin;
+  const voxelSize = Math.max(nLen, yLen, pLen) / R;
+  const nRes = Math.ceil(nLen / voxelSize);
+  const yRes = Math.ceil(yLen / voxelSize);
+  const pRes = Math.ceil(pLen / voxelSize);
+
+  const columnVolumes = new Float64Array(nRes);
+  const baseVol = voxelSize * voxelSize * voxelSize;
+
+  const rayOrigin = new THREE.Vector3();
+  const raycaster = new THREE.Raycaster();
+  const _tmpVoxelCenter = new THREE.Vector3();
+
+  for (let iy = 0; iy < yRes; iy++) {
+    const y = yMin + (iy + 0.5) * voxelSize;
+    for (let ip = 0; ip < pRes; ip++) {
+      const p = pMin + (ip + 0.5) * voxelSize;
+
+      // ray origin = one voxel behind nMin, at cell (y, p) position
+      rayOrigin.copy(normalDir).multiplyScalar(nMin - voxelSize)
+        .addScaledVector(UP, y)
+        .addScaledVector(perpXZ, p);
+
+      raycaster.set(rayOrigin, normalDir);
+      raycaster.firstHitOnly = false;
+
+      let allHits: number[] = [];
+      for (const mesh of meshList) {
+        const hits = raycaster.intersectObject(mesh, false);
+        for (let h = 0; h < hits.length; h++) allHits.push(hits[h].distance);
+      }
+      if (allHits.length < 2) continue;
+      allHits.sort((a, b) => a - b);
+
+      for (let k = 0; k < allHits.length - 1; k += 2) {
+        const enterDist = allHits[k];
+        const exitDist = allHits[k + 1];
+        const startCol = Math.max(0, Math.floor(enterDist / voxelSize));
+        const endCol = Math.min(nRes - 1, Math.floor(exitDist / voxelSize));
+
+        for (let c = startCol; c <= endCol; c++) {
+          const colWorldStart = c * voxelSize;
+          const colWorldEnd = (c + 1) * voxelSize;
+          const segStart = Math.max(enterDist, colWorldStart);
+          const segEnd = Math.min(exitDist, colWorldEnd);
+          const len = Math.max(0, segEnd - segStart);
+          const fraction = len / voxelSize;
+
+          if (hasPreCut) {
+            // Voxel center in world space
+            const nCenter = nMin + (c + 0.5) * voxelSize;
+            _tmpVoxelCenter.copy(normalDir).multiplyScalar(nCenter)
+              .addScaledVector(UP, y)
+              .addScaledVector(perpXZ, p);
+            if (preClipPlane!.distanceToPoint(_tmpVoxelCenter) >= 0) continue;
+          }
+          columnVolumes[c] += baseVol * fraction;
+        }
+      }
+    }
+  }
+
+  // Build CDF
+  const cdf = new Float64Array(nRes);
+  cdf[0] = columnVolumes[0];
+  for (let i = 1; i < nRes; i++) cdf[i] = cdf[i - 1] + columnVolumes[i];
+  const totalVolume = cdf[nRes - 1];
+  if (totalVolume <= 0) return null;
+
+  // Compute cut planes along normalDir
+  const targetPerSlice = totalVolume / (N + 1);
+  const cutPlanes: number[] = [];
+  for (let s = 1; s <= N; s++) {
+    const target = targetPerSlice * s;
+    let lo = 0, hi = nRes - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cdf[mid] < target) lo = mid + 1;
+      else hi = mid;
+    }
+    const prevCum = lo > 0 ? cdf[lo - 1] : 0;
+    const colVol = columnVolumes[lo];
+    const frac = colVol > 1e-12 ? (target - prevCum) / colVol : 0;
+    // Position along normalDir in world space
+    cutPlanes.push(nMin + (lo + frac) * voxelSize);
+  }
+
+  // Validate slice volumes
+  const sliceVolumes: number[] = new Array(N + 1).fill(0);
+  let sliceIdx = 0;
+  for (let i = 0; i < nRes; i++) {
+    while (sliceIdx < N && cdf[i] >= targetPerSlice * (sliceIdx + 1)) sliceIdx++;
+    sliceVolumes[sliceIdx] += columnVolumes[i];
+  }
+
+  return {
+    cutPlanes,
+    axis: 'custom',
+    sliceNormal: [normalDir.x, normalDir.y, normalDir.z],
+    sliceVolumes,
+    slicePercentages: sliceVolumes.map((v) => +(v / totalVolume * 100).toFixed(2)),
+    totalVolume,
+    boxMin: [box.min.x, box.min.y, box.min.z],
+    boxMax: [box.max.x, box.max.y, box.max.z],
+    voxelSize,
+    resolution: nRes,
+    _cdf: cdf,
+    _boxMin: nMin,
+    _axisLen: nLen,
+    _voxelSize: voxelSize,
+  };
+}
+
+// ── Shared helper: build CutResult from column volumes (axis-aligned case) ──
+
+function buildCutResult(
+  columnVolumes: Float64Array,
+  cutAxisRes: number,
+  box: THREE.Box3,
+  axis: string,
+  axi: number,
+  size: THREE.Vector3,
+  voxelSize: number,
+  N: number,
+): CutResult {
   const cdf = new Float64Array(cutAxisRes);
   cdf[0] = columnVolumes[0];
   for (let i = 1; i < cutAxisRes; i++) cdf[i] = cdf[i - 1] + columnVolumes[i];
   const totalVolume = cdf[cutAxisRes - 1];
+  if (totalVolume <= 0) return { cutPlanes: [], axis, sliceVolumes: [], slicePercentages: [], totalVolume: 0, boxMin: [0,0,0], boxMax: [0,0,0], voxelSize, resolution: cutAxisRes, _cdf: cdf, _boxMin: 0, _axisLen: 0, _voxelSize: voxelSize };
 
-  if (totalVolume <= 0) return null;
-
-  // 4. O(N log R) 精确等体积切面求解
   const targetPerSlice = totalVolume / (N + 1);
   const cutPlanes: number[] = [];
-
   for (let s = 1; s <= N; s++) {
     const target = targetPerSlice * s;
-
-    // 二分查找目标体积所在的 column
     let lo = 0, hi = cutAxisRes - 1;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
       if (cdf[mid] < target) lo = mid + 1;
       else hi = mid;
     }
-
-    // 在 column 内部线性插值，达到亚体素级切面定位
     const prevCum = lo > 0 ? cdf[lo - 1] : 0;
     const colVol = columnVolumes[lo];
     const frac = colVol > 1e-12 ? (target - prevCum) / colVol : 0;
-
     cutPlanes.push(box.min.getComponent(axi) + (lo + frac) * voxelSize);
   }
 
-  // 5. 验证每块实际体积
   const sliceVolumes: number[] = new Array(N + 1).fill(0);
   let sliceIdx = 0;
   for (let i = 0; i < cutAxisRes; i++) {
@@ -174,6 +341,12 @@ export function cpuExactEqualSlices(
     _axisLen: size.getComponent(axi),
     _voxelSize: voxelSize,
   };
+}
+
+function isAxisAligned(v: THREE.Vector3): boolean {
+  const eps = 0.001;
+  return (Math.abs(v.x) > 1 - eps && Math.abs(v.z) < eps) ||
+         (Math.abs(v.z) > 1 - eps && Math.abs(v.x) < eps);
 }
 
 /** 极速重切片：利用缓存的 CDF，毫秒级返回新切面 */

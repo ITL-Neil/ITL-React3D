@@ -336,6 +336,8 @@ export default function App() {
                     canDrag: levaConfig.canDrag,
                     cutN: levaConfig.cutN,
                     cutR: levaConfig.cutR,
+                    cutDepth: levaConfig.cutDepth,
+                    cutAngle: levaConfig.cutAngle,
                   }}
                   style={{ width: '100%', height: '100%' }}
                 />
