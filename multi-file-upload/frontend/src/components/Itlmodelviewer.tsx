@@ -289,144 +289,6 @@ function buildSequentialCutLayers(
   return layers;
 }
 
-/* ═════════════════════════════════════════
-   PCA-based auto-alignment
-   ══════════════════════════════════════════ */
-function alignModelToGround(gltfScene: THREE.Group): THREE.Group {
-  gltfScene.updateWorldMatrix(true, true);
-
-  const meshList: THREE.Mesh[] = [];
-  gltfScene.traverse((n) => { if ((n as THREE.Mesh).isMesh && (n as THREE.Mesh).geometry) meshList.push(n as THREE.Mesh); });
-  if (meshList.length === 0) {
-    const box = computeSceneBox(gltfScene);
-    const wrapper = new THREE.Group();
-    wrapper.add(gltfScene);
-    if (box) wrapper.position.y -= box.min.y;
-    return wrapper;
-  }
-
-  const pts: number[] = [];
-  const v = new THREE.Vector3();
-  for (const m of meshList) {
-    const pos = m.geometry.attributes.position;
-    if (!pos) continue;
-    const step = Math.max(1, Math.floor(pos.count / 8000));
-    for (let i = 0; i < pos.count; i += step) {
-      v.fromBufferAttribute(pos, i);
-      v.applyMatrix4(m.matrixWorld);
-      pts.push(v.x, v.y, v.z);
-    }
-  }
-
-  const n = pts.length / 3;
-  if (n < 50) {
-    const box = computeSceneBox(gltfScene);
-    const wrapper = new THREE.Group();
-    wrapper.add(gltfScene);
-    if (box) wrapper.position.y -= box.min.y;
-    return wrapper;
-  }
-
-  let cx = 0, cy = 0, cz = 0;
-  for (let i = 0; i < pts.length; i += 3) { cx += pts[i]; cy += pts[i + 1]; cz += pts[i + 2]; }
-  cx /= n; cy /= n; cz /= n;
-
-  let cxx = 0, cxy = 0, cxz = 0, cyy = 0, cyz = 0, czz = 0;
-  for (let i = 0; i < pts.length; i += 3) {
-    const dx = pts[i] - cx, dy = pts[i + 1] - cy, dz = pts[i + 2] - cz;
-    cxx += dx * dx; cxy += dx * dy; cxz += dx * dz;
-    cyy += dy * dy; cyz += dy * dz; czz += dz * dz;
-  }
-  cxx /= n; cxy /= n; cxz /= n; cyy /= n; cyz /= n; czz /= n;
-
-  const powerIter = (start: THREE.Vector3): THREE.Vector3 => {
-    let vv = start.clone();
-    for (let k = 0; k < 15; k++) {
-      vv.copy(new THREE.Vector3(
-        cxx * vv.x + cxy * vv.y + cxz * vv.z,
-        cxy * vv.x + cyy * vv.y + cyz * vv.z,
-        cxz * vv.x + cyz * vv.y + czz * vv.z,
-      )).normalize();
-    }
-    return vv;
-  };
-  const ev1 = powerIter(new THREE.Vector3(1, 0, 0));
-  const s2 = new THREE.Vector3(0, 1, 0).sub(ev1.clone().multiplyScalar(ev1.dot(new THREE.Vector3(0, 1, 0)))).normalize();
-  const ev2 = powerIter(s2.length() > 0.1 ? s2 : new THREE.Vector3(0, 0, 1));
-  const ev3 = new THREE.Vector3().crossVectors(ev1, ev2).normalize();
-
-  const ray = (vv: THREE.Vector3) => {
-    const x = vv.x, y = vv.y, z = vv.z;
-    return cxx * x * x + cyy * y * y + czz * z * z + 2 * (cxy * x * y + cxz * x * z + cyz * y * z);
-  };
-  const pairs = [{ v: ev1 }, { v: ev2 }, { v: ev3 }];
-  pairs.forEach((p) => { (p as any).val = ray(p.v); });
-  pairs.sort((a: any, b: any) => a.val - b.val);
-
-  const worldUp = new THREE.Vector3(0, 1, 0);
-  const worldDown = new THREE.Vector3(0, -1, 0);
-  const trialLabels = ['shortest', 'middle', 'longest', '+X', '-X', '+Y', '-Y', '+Z', '-Z'];
-  const allCandidates = [
-    (pairs[0] as any).v.clone() as THREE.Vector3,
-    (pairs[1] as any).v.clone() as THREE.Vector3,
-    (pairs[2] as any).v.clone() as THREE.Vector3,
-    new THREE.Vector3( 1, 0, 0),
-    new THREE.Vector3(-1, 0, 0),
-    new THREE.Vector3( 0, 1, 0),
-    new THREE.Vector3( 0,-1, 0),
-    new THREE.Vector3( 0, 0, 1),
-    new THREE.Vector3( 0, 0,-1),
-  ];
-
-  let bestHeight = Infinity;
-  let bestQuat = new THREE.Quaternion();
-  let bestMinY = 0;
-  let bestLabel = '?';
-
-  for (let t = 0; t < allCandidates.length; t++) {
-    const axis = allCandidates[t];
-    const target = axis.dot(worldUp) >= -1e-12 ? worldUp : worldDown;
-    const trialQuat = new THREE.Quaternion().setFromUnitVectors(axis, target);
-
-    gltfScene.quaternion.copy(trialQuat);
-    gltfScene.position.set(0, 0, 0);
-    gltfScene.updateMatrix();
-    gltfScene.updateWorldMatrix(true, true);
-
-    const trialBox = computeSceneBox(gltfScene);
-    if (!trialBox) continue;
-    const h = trialBox.max.y - trialBox.min.y;
-
-    if (h < bestHeight) {
-      bestHeight = h;
-      bestQuat.copy(trialQuat);
-      bestMinY = trialBox.min.y;
-      bestLabel = trialLabels[t];
-    }
-  }
-
-  gltfScene.quaternion.identity();
-  gltfScene.position.set(0, 0, 0);
-  gltfScene.updateMatrix();
-
-  const wrapper = new THREE.Group();
-  wrapper.add(gltfScene);
-  wrapper.quaternion.copy(bestQuat);
-  wrapper.position.set(0, -bestMinY, 0);
-  wrapper.updateMatrix();
-  wrapper.updateWorldMatrix(true, true);
-
-  const verify = computeSceneBox(wrapper);
-  if (verify) {
-    if (Math.abs(verify.min.y) > 0.01) {
-      wrapper.position.y -= verify.min.y;
-      wrapper.updateMatrix();
-      wrapper.updateWorldMatrix(true, true);
-    }
-  }
-
-  return wrapper;
-}
 
 /* ═════════════════════════════════════════
    Lighting presets
@@ -979,8 +841,12 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
     loader.load(
       modelUrl,
       (gltf) => {
-        const aligned = alignModelToGround(gltf.scene);
-        setScene(aligned);
+        const wrapper = new THREE.Group();
+        wrapper.add(gltf.scene);
+        autoAlignTopFace(wrapper, true);
+        setScene(wrapper);
+        setForceUpdate(t => t + 1);
+        setAlignTick(t => t + 1);
         setLoading(false);
       },
       undefined,
@@ -1152,15 +1018,14 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
         {/* ── Single-cut cutBody (no slices) ── */}
         {config.mode === 'cutBody' && preClipPlane && !showSlice && scene && (
           <>
-            {/* Original model showing remaining portion */}
+            {/* Full model unclipped — cutBody overlay renders used portion on top */}
             <OriginalModel
               key={`origcb-${forceUpdate}`}
               scene={scene}
               orientation={config.orientation}
               forceUpdate={forceUpdate}
-              preClipPlane={preClipPlane}
             />
-            {/* Removed (used) portion overlay */}
+            {/* Removed (used) portion overlay — matches PreciseDualModeModel convention */}
             {cutBodyMaterial && meshData.length > 0 && (
               <RenderMeshesWithMaterial
                 meshData={meshData}

@@ -208,11 +208,14 @@ function Select({ label, value, options, onChange, onOpenDropdown }: {
     }
   };
 
-  // Close when clicking outside
+  // Close when clicking outside (but not on the dropdown portal itself)
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+      const target = e.target as HTMLElement;
+      // Don't close if click is inside the dropdown portal — the option's onClick needs to fire
+      if (target.closest('.lv-dropdown-portal')) return;
+      if (wrapRef.current && !wrapRef.current.contains(target)) {
         setOpen(false);
         onOpenDropdown(null);
       }
