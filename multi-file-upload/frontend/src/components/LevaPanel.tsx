@@ -39,10 +39,10 @@ export interface LevaConfig {
 export const DEFAULT_CONFIG: LevaConfig = {
   autoRotate: false,
   contactShadow: true,
-  lightIntensity: 1.0,
+  lightIntensity: 4.5,
   preset: 'rembrandt',
   shadows: true,
-  background: '#f0f0f0',
+  background: '#000000',
 
   orientation: 4,
   canRotate: true,
@@ -54,8 +54,8 @@ export const DEFAULT_CONFIG: LevaConfig = {
   cutN: 0,
   cutR: 96,
   showCuttingSurface: true,
-  cutFaceMaskColor: '#ff6b6b',
-  cutBodyMaskColor: '#4472c4',
+  cutFaceMaskColor: '#e63946',
+  cutBodyMaskColor: '#e63946',
   showCutBodyWireframe: false,
   faceNCutsView: 'FaceAndBody',
 

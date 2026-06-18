@@ -338,6 +338,14 @@ export default function App() {
                     cutR: levaConfig.cutR,
                     cutDepth: levaConfig.cutDepth,
                     cutAngle: levaConfig.cutAngle,
+                    mode: levaConfig.cutMode,
+                    cutFaceMaskColor: levaConfig.cutFaceMaskColor,
+                    cutBodyMaskColor: levaConfig.cutBodyMaskColor,
+                    cutFaceMultiStyle: levaConfig.faceNCutsView,
+                    faceOnlyBaseOpacity: levaConfig.modelOpacityForFaceOrBoth,
+                    cutFaceOverlayOpacity: levaConfig.overlayOpacityForBodyOrBoth,
+                    cutBodyRemovedOpacity: levaConfig.cutBodyDepthOpacity,
+                    cutBodyLayeredOpacity: levaConfig.cutBodyNCutsOpacity,
                   }}
                   style={{ width: '100%', height: '100%' }}
                 />

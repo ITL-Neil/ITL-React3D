@@ -8,10 +8,8 @@
  * color-coded slices with clipping planes.
  *
  * Accepts LevaPanel-compatible config props so the settings panel is live.
- *
- * v2: added cutFace / cutBody mode logic migrated from itl3D/PreciseDualModeModel.tsx
  */
-import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
@@ -34,15 +32,9 @@ const dracoLoader = new DRACOLoader();
 dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
 loader.setDRACOLoader(dracoLoader);
 
-/* ═════════════════════════════════════════
+/* ═══════════════════════════════════════════
    Helpers
-═════════════════════════════════════════ */
-
-const MULTI_CUT_COLORS = [
-  '#e63946', '#118ab2', '#ffd166', '#06d6a0', '#8338ec',
-  '#fb8500', '#3a86ff', '#ef476f', '#8ac926', '#ff006e',
-  '#ffbe0b', '#2ec4b6',
-];
+═══════════════════════════════════════════ */
 
 function formatVolume(v: number): string {
   if (v < 1e-6) return `${(v * 1e9).toFixed(2)} mm³`;
@@ -70,6 +62,7 @@ function computeSceneBox(scene: THREE.Group) {
     if (mesh.name === 'bottom-cap' || mesh.name.startsWith('bottom-cap')) return;
     const pos = mesh.geometry.attributes.position;
     if (!pos || pos.count === 0) return;
+    // Sample up to 2000 vertices per mesh, then expand box directly
     const step = Math.max(1, Math.floor(pos.count / 2000));
     for (let i = 0; i < pos.count; i += step) {
       vec.fromBufferAttribute(pos, i);
@@ -92,7 +85,7 @@ function collectMeshes(gltfScene: THREE.Group) {
   gltfScene.traverse((node) => {
     if (!(node as THREE.Mesh).isMesh || !(node as THREE.Mesh).geometry) return;
     const mesh = node as THREE.Mesh;
-    if (mesh.name === 'bottom-cap' || mesh.name.startsWith('bottom-cap')) return;
+    if (mesh.name === 'bottom-cap' || mesh.name.startsWith('bottom-cap')) return;  // skip sealing cap — flat geometry breaks BVH
     const geo = mesh.geometry;
     const pos = geo.attributes.position;
     if (!pos || pos.count === 0) return;
@@ -105,199 +98,21 @@ function collectMeshes(gltfScene: THREE.Group) {
   return meshes;
 }
 
-/* ═════════════════════════════════════════
-   Stencil Cap Helpers — migrated from PreciseDualModeModel.tsx
-   ══════════════════════════════════════════ */
+/* ═══════════════════════════════════════════
+   PCA-based auto-alignment: find the flattest orientation (minimal Y-span),
+   rotate the model so its bottom face is parallel to XZ, then ground at y=0.
 
-/** Build single-cut stencil cap data for cutFace mode */
-function buildStencilCapData(
-  clippingPlane: THREE.Plane,
-  capColor: string,
-  projectionRange: { min: number; max: number } | null,
-): { geometry: THREE.PlaneGeometry; stencilBack: THREE.MeshBasicMaterial; stencilFront: THREE.MeshBasicMaterial; cap: THREE.MeshBasicMaterial } | null {
-  if (!projectionRange) return null;
-  const span = projectionRange.max - projectionRange.min;
-  const diagonal = span * 2;
-  const geometry = new THREE.PlaneGeometry(diagonal * 2, diagonal * 2, 1, 1);
-  const quaternion = new THREE.Quaternion();
-  quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), clippingPlane.normal);
-  geometry.applyQuaternion(quaternion);
-  const pos = clippingPlane.normal.clone().multiplyScalar(-clippingPlane.constant);
-  geometry.translate(pos.x, pos.y, pos.z);
-
-  const stencilBack = new THREE.MeshBasicMaterial({
-    side: THREE.BackSide,
-    clippingPlanes: [clippingPlane],
-    colorWrite: false, depthWrite: false, depthTest: false,
-    stencilWrite: true,
-    stencilFunc: THREE.AlwaysStencilFunc,
-    stencilFail: THREE.KeepStencilOp,
-    stencilZFail: THREE.KeepStencilOp,
-    stencilZPass: THREE.IncrementWrapStencilOp,
-  });
-
-  const stencilFront = new THREE.MeshBasicMaterial({
-    side: THREE.FrontSide,
-    clippingPlanes: [clippingPlane],
-    colorWrite: false, depthWrite: false, depthTest: false,
-    stencilWrite: true,
-    stencilFunc: THREE.AlwaysStencilFunc,
-    stencilFail: THREE.KeepStencilOp,
-    stencilZFail: THREE.KeepStencilOp,
-    stencilZPass: THREE.DecrementWrapStencilOp,
-  });
-
-  const cap = new THREE.MeshBasicMaterial({
-    color: new THREE.Color(capColor),
-    side: THREE.DoubleSide,
-    transparent: false, opacity: 1.0,
-    depthWrite: true, depthTest: false, fog: false,
-    stencilWrite: true, stencilRef: 0,
-    stencilFunc: THREE.NotEqualStencilFunc,
-    stencilFail: THREE.ReplaceStencilOp,
-    stencilZFail: THREE.ReplaceStencilOp,
-    stencilZPass: THREE.ReplaceStencilOp,
-  });
-
-  return { geometry, stencilBack, stencilFront, cap };
-}
-
-/** Build multi-cut stencil cap data for cutFace + cutN > 0 */
-function buildMultiStencilCapData(
-  cutPlanes: number[],
-  sliceNormal: [number, number, number] | null,
-  capColor: string,
-  projectionRange: { min: number; max: number } | null,
-): { geometry: THREE.PlaneGeometry; stencilBack: THREE.MeshBasicMaterial; stencilFront: THREE.MeshBasicMaterial; cap: THREE.MeshBasicMaterial; color: string }[] {
-  if (!projectionRange || cutPlanes.length === 0) return [];
-
-  const normalVec = sliceNormal
-    ? new THREE.Vector3(sliceNormal[0], sliceNormal[1], sliceNormal[2])
-    : new THREE.Vector3(0, 0, 1);
-
-  return cutPlanes.map((pos, i) => {
-    const plane = new THREE.Plane(normalVec.clone(), -pos);
-    const span = projectionRange.max - projectionRange.min;
-    const diagonal = span * 2;
-    const geometry = new THREE.PlaneGeometry(diagonal * 2, diagonal * 2, 1, 1);
-    const quaternion = new THREE.Quaternion();
-    quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), plane.normal);
-    geometry.applyQuaternion(quaternion);
-    const pp = plane.normal.clone().multiplyScalar(-plane.constant);
-    geometry.translate(pp.x, pp.y, pp.z);
-
-    const color = capColor;
-
-    const stencilBack = new THREE.MeshBasicMaterial({
-      side: THREE.BackSide,
-      clippingPlanes: [plane],
-      colorWrite: false, depthWrite: false, depthTest: false,
-      stencilWrite: true, stencilFunc: THREE.AlwaysStencilFunc,
-      stencilFail: THREE.KeepStencilOp, stencilZFail: THREE.KeepStencilOp,
-      stencilZPass: THREE.IncrementWrapStencilOp,
-    });
-    const stencilFront = new THREE.MeshBasicMaterial({
-      side: THREE.FrontSide,
-      clippingPlanes: [plane],
-      colorWrite: false, depthWrite: false, depthTest: false,
-      stencilWrite: true, stencilFunc: THREE.AlwaysStencilFunc,
-      stencilFail: THREE.KeepStencilOp, stencilZFail: THREE.KeepStencilOp,
-      stencilZPass: THREE.DecrementWrapStencilOp,
-    });
-    const capMat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(color),
-      side: THREE.DoubleSide,
-      transparent: false, opacity: 1.0,
-      depthWrite: true, depthTest: false, fog: false,
-      stencilWrite: true, stencilRef: 0,
-      stencilFunc: THREE.NotEqualStencilFunc,
-      stencilFail: THREE.ReplaceStencilOp,
-      stencilZFail: THREE.ReplaceStencilOp,
-      stencilZPass: THREE.ReplaceStencilOp,
-    });
-
-    return { geometry, stencilBack, stencilFront, cap: capMat, color };
-  });
-}
-
-/* ═════════════════════════════════════════
-   cutBody Helpers — migrated from PreciseDualModeModel.tsx
-   ══════════════════════════════════════════ */
-
-function createForwardPlane(normal: THREE.Vector3, distance: number) {
-  return new THREE.Plane(normal.clone(), -distance);
-}
-function createReversePlane(normal: THREE.Vector3, distance: number) {
-  return new THREE.Plane(normal.clone().negate(), distance);
-}
-
-/** Build cutBody single-cut removed-portion material */
-function buildCutBodyMaterial(
-  mainMaterial: THREE.Material | null,
-  cutBodyMaskColor: string,
-  removedOpacity: number,
-  clippingPlane: THREE.Plane,
-): THREE.MeshStandardMaterial {
-  const base = (mainMaterial as THREE.MeshStandardMaterial)?.clone()
-    ?? new THREE.MeshStandardMaterial();
-  const c = new THREE.Color(cutBodyMaskColor);
-  base.color = c;
-  base.emissive = c;
-  base.emissiveIntensity = 0.12;
-  base.side = THREE.DoubleSide;
-  base.transparent = true;
-  base.opacity = Math.min(1, Math.max(0.05, removedOpacity));
-  // Use clippingPlane directly — it already represents the used portion
-  base.clippingPlanes = [clippingPlane.clone()];
-  base.clipShadows = true;
-  base.needsUpdate = true;
-  return base;
-}
-
-/** Build sequential cut layers for cutBody multi-cut */
-function buildSequentialCutLayers(
-  cutPlanes: number[],
-  sliceNormal: [number, number, number] | null,
-  cutBodyLayeredOpacity: number,
-  cutPlanesDistances: number[],
-  localAxisMin: number,
-): { index: number; startDistance: number; endDistance: number; color: string; clippingPlanes: THREE.Plane[] }[] {
-  if (cutPlanes.length === 0) return [];
-
-  const normalVec = sliceNormal
-    ? new THREE.Vector3(sliceNormal[0], sliceNormal[1], sliceNormal[2])
-    : new THREE.Vector3(1, 0, 0);
-
-  const epsilon = 0.001;
-  const layers: { index: number; startDistance: number; endDistance: number; color: string; clippingPlanes: THREE.Plane[] }[] = [];
-
-  for (let index = 0; index < cutPlanes.length; index++) {
-    const startDist = index === 0 ? localAxisMin + epsilon : cutPlanesDistances[index - 1];
-    const endDist = cutPlanesDistances[index] - epsilon;
-    layers.push({
-      index,
-      startDistance: startDist,
-      endDistance: endDist,
-      color: MULTI_CUT_COLORS[index % MULTI_CUT_COLORS.length],
-      clippingPlanes: [
-        createForwardPlane(normalVec, startDist),
-        createReversePlane(normalVec, endDist),
-      ],
-    });
-  }
-
-  return layers;
-}
-
-/* ═════════════════════════════════════════
-   PCA-based auto-alignment
-   ══════════════════════════════════════════ */
+   Ported from coal-slicer App.jsx's alignModelToGround.
+   Uses a WRAPPER group so R3F preserves the transform correctly.
+═══════════════════════════════════════════ */
 function alignModelToGround(gltfScene: THREE.Group): THREE.Group {
   gltfScene.updateWorldMatrix(true, true);
 
+  // ── Collect all world-space vertices from meshes ──
   const meshList: THREE.Mesh[] = [];
   gltfScene.traverse((n) => { if ((n as THREE.Mesh).isMesh && (n as THREE.Mesh).geometry) meshList.push(n as THREE.Mesh); });
   if (meshList.length === 0) {
+    // Fallback: just wrap and shift
     const box = computeSceneBox(gltfScene);
     const wrapper = new THREE.Group();
     wrapper.add(gltfScene);
@@ -327,10 +142,12 @@ function alignModelToGround(gltfScene: THREE.Group): THREE.Group {
     return wrapper;
   }
 
+  // ── Centroid ──
   let cx = 0, cy = 0, cz = 0;
   for (let i = 0; i < pts.length; i += 3) { cx += pts[i]; cy += pts[i + 1]; cz += pts[i + 2]; }
   cx /= n; cy /= n; cz /= n;
 
+  // ── Covariance matrix ──
   let cxx = 0, cxy = 0, cxz = 0, cyy = 0, cyz = 0, czz = 0;
   for (let i = 0; i < pts.length; i += 3) {
     const dx = pts[i] - cx, dy = pts[i + 1] - cy, dz = pts[i + 2] - cz;
@@ -339,6 +156,7 @@ function alignModelToGround(gltfScene: THREE.Group): THREE.Group {
   }
   cxx /= n; cxy /= n; cxz /= n; cyy /= n; cyz /= n; czz /= n;
 
+  // ── Power iteration for eigenvectors ──
   const powerIter = (start: THREE.Vector3): THREE.Vector3 => {
     let vv = start.clone();
     for (let k = 0; k < 15; k++) {
@@ -363,6 +181,10 @@ function alignModelToGround(gltfScene: THREE.Group): THREE.Group {
   pairs.forEach((p) => { (p as any).val = ray(p.v); });
   pairs.sort((a: any, b: any) => a.val - b.val);
 
+  // ── Save original world box for verification ──
+  const origBox = computeSceneBox(gltfScene);
+
+  // ── Candidate axes: PCA 3 axes + 6 world axes ──
   const worldUp = new THREE.Vector3(0, 1, 0);
   const worldDown = new THREE.Vector3(0, -1, 0);
   const trialLabels = ['shortest', 'middle', 'longest', '+X', '-X', '+Y', '-Y', '+Z', '-Z'];
@@ -383,6 +205,8 @@ function alignModelToGround(gltfScene: THREE.Group): THREE.Group {
   let bestMinY = 0;
   let bestLabel = '?';
 
+  // We test on the original scene directly (temporarily mutating its quaternion)
+  // and restore at the end — we'll apply the winner to a WRAPPER group.
   for (let t = 0; t < allCandidates.length; t++) {
     const axis = allCandidates[t];
     const target = axis.dot(worldUp) >= -1e-12 ? worldUp : worldDown;
@@ -397,6 +221,8 @@ function alignModelToGround(gltfScene: THREE.Group): THREE.Group {
     if (!trialBox) continue;
     const h = trialBox.max.y - trialBox.min.y;
 
+    console.log(`[Align] trial #${t} ${trialLabels[t]}: height=${h.toFixed(3)}, minY=${trialBox.min.y.toFixed(4)}, maxY=${trialBox.max.y.toFixed(4)}, axis=[${axis.x.toFixed(3)},${axis.y.toFixed(3)},${axis.z.toFixed(3)}]`);
+
     if (h < bestHeight) {
       bestHeight = h;
       bestQuat.copy(trialQuat);
@@ -405,10 +231,14 @@ function alignModelToGround(gltfScene: THREE.Group): THREE.Group {
     }
   }
 
+  // ── Restore original scene transform ──
   gltfScene.quaternion.identity();
   gltfScene.position.set(0, 0, 0);
   gltfScene.updateMatrix();
 
+  console.log(`[Align] chosen: ${bestLabel}, height=${bestHeight.toFixed(3)}, quat=[${bestQuat.x.toFixed(4)},${bestQuat.y.toFixed(4)},${bestQuat.z.toFixed(4)},${bestQuat.w.toFixed(4)}], origBox minY=${origBox?.min.y.toFixed(4)}`);
+
+  // ── Create wrapper group with alignment transform ──
   const wrapper = new THREE.Group();
   wrapper.add(gltfScene);
   wrapper.quaternion.copy(bestQuat);
@@ -416,21 +246,25 @@ function alignModelToGround(gltfScene: THREE.Group): THREE.Group {
   wrapper.updateMatrix();
   wrapper.updateWorldMatrix(true, true);
 
+  // ── Verify bottom at y=0 ──
   const verify = computeSceneBox(wrapper);
   if (verify) {
+    console.log('[Align] wrapper verify — minY:', verify.min.y.toFixed(4), 'height:', (verify.max.y - verify.min.y).toFixed(3));
     if (Math.abs(verify.min.y) > 0.01) {
       wrapper.position.y -= verify.min.y;
       wrapper.updateMatrix();
       wrapper.updateWorldMatrix(true, true);
+      const recheck = computeSceneBox(wrapper);
+      console.log('[Align] drift corrected — recheck minY:', recheck?.min.y.toFixed(4));
     }
   }
 
   return wrapper;
 }
 
-/* ═════════════════════════════════════════
+/* ═══════════════════════════════════════════
    Lighting presets
-═════════════════════════════════════════ */
+═══════════════════════════════════════════ */
 interface LightDef {
   type: 'ambient' | 'directional';
   color?: string;
@@ -468,9 +302,9 @@ const LIGHTING_PRESETS: Record<PresetName, LightDef[]> = {
   ],
 };
 
-/* ═════════════════════════════════════════
+/* ═══════════════════════════════════════════
    Orientation presets
-═════════════════════════════════════════ */
+═══════════════════════════════════════════ */
 function getOrientationAngles(orientation: number): { azimuth: number; elevation: number } {
   const idx = Math.max(1, Math.min(12, Math.round(orientation))) - 1;
   const azimuth = (idx / 12) * Math.PI * 2;
@@ -478,9 +312,9 @@ function getOrientationAngles(orientation: number): { azimuth: number; elevation
   return { azimuth, elevation };
 }
 
-/* ═════════════════════════════════════════
+/* ═══════════════════════════════════════════
    R3F sub-components
-═════════════════════════════════════════ */
+═══════════════════════════════════════════ */
 
 function SceneBackground({ color }: { color: string }) {
   useThree(({ scene }) => {
@@ -493,7 +327,7 @@ function SceneSetup() {
   const { gl } = useThree();
   useEffect(() => {
     gl.localClippingEnabled = true;
-    // stencil is enabled via <Canvas gl={{ stencil: true }}>
+    gl.stencil = true; // enable stencil buffer for cutFace caps
   }, [gl]);
   return null;
 }
@@ -578,22 +412,21 @@ function ClippedMesh({ geometry, worldMatrix, color, clippingPlanes }: {
   );
 }
 
-/* ── UsedOverlay — semi-transparent overlay for the cut-away (used) portion ── */
-function UsedOverlay({ scene, preClipPlane, forceUpdate, maskColor, opacity }: {
+/* ── UsedOverlay — white transparent overlay for the cut-away portion ── */
+function UsedOverlay({ scene, preClipPlane, forceUpdate }: {
   scene: THREE.Group;
   preClipPlane: THREE.Plane;
   forceUpdate: number;
-  maskColor?: string;
-  opacity?: number;
 }) {
   const meshData = useMemo(() => {
     scene.updateWorldMatrix(true, true);
     return collectMeshes(scene);
   }, [scene, forceUpdate]);
 
-  const usedPlane = preClipPlane.clone(); // preClipPlane keeps used (inner) side, use directly
-  const usedOpacity = opacity ?? 0.35;
-  const usedColor = maskColor ?? '#ffffff';
+  // Original plane = show the "used" side (preClipPlane normal points toward used direction)
+  const usedPlane = useMemo(() => {
+    return preClipPlane.clone();
+  }, [preClipPlane]);
 
   if (meshData.length === 0) return null;
 
@@ -613,9 +446,9 @@ function UsedOverlay({ scene, preClipPlane, forceUpdate, maskColor, opacity }: {
             scale={[s.x, s.y, s.z]}
           >
             <meshStandardMaterial
-              color={usedColor}
+              color="#ffffff"
               transparent
-              opacity={usedOpacity}
+              opacity={0.35}
               roughness={0.5}
               metalness={0.05}
               side={THREE.DoubleSide}
@@ -639,22 +472,43 @@ function SlicedModel({ scene, cutResult, forceUpdate, preClipPlane }: {
 }) {
   const meshData = useMemo(() => {
     scene.updateWorldMatrix(true, true);
+    console.log('[SlicedModel] scene transform at collect time:',
+      'quat=', [scene.quaternion.x.toFixed(4), scene.quaternion.y.toFixed(4), scene.quaternion.z.toFixed(4), scene.quaternion.w.toFixed(4)],
+      'pos=', [scene.position.x.toFixed(4), scene.position.y.toFixed(4), scene.position.z.toFixed(4)]);
     const md = collectMeshes(scene);
+    if (md.length > 0) {
+      const first = md[0].matrixWorld;
+      const p = new THREE.Vector3();
+      const q = new THREE.Quaternion();
+      const s = new THREE.Vector3();
+      first.decompose(p, q, s);
+      console.log('[SlicedModel] first mesh world:', 'pos=', p.toArray().map(v => v.toFixed(3)), 'quat=', q.toArray().map(v => v.toFixed(4)));
+    }
     return md;
   }, [scene, forceUpdate]);
   const box = useMemo(() => {
     scene.updateWorldMatrix(true, true);
-    return computeSceneBox(scene);
+    const b = computeSceneBox(scene);
+    if (b) {
+      console.log('[SlicedModel] world box:', {
+        min: b.min.toArray().map(v => v.toFixed(3)),
+        max: b.max.toArray().map(v => v.toFixed(3)),
+        size: new THREE.Vector3().subVectors(b.max, b.min).toArray().map(v => v.toFixed(3)),
+      });
+    }
+    return b;
   }, [scene, forceUpdate]);
 
   const { axis, cutPlanes, sliceNormal } = cutResult;
   const totalSlices = cutPlanes.length + 1;
 
+  // Pre-built slice normal Vector3 (when using rotated slicing)
   const sliceNormalVec = useMemo(() => {
     if (!sliceNormal) return null;
     return new THREE.Vector3(sliceNormal[0], sliceNormal[1], sliceNormal[2]);
   }, [sliceNormal]);
 
+  // Camera params
   const camParams = useMemo(() => {
     if (!box) return null;
     const c = new THREE.Vector3();
@@ -664,6 +518,7 @@ function SlicedModel({ scene, cutResult, forceUpdate, preClipPlane }: {
     return { center: [c.x, c.y, c.z] as [number, number, number], maxDim: Math.max(s.x, s.y, s.z) };
   }, [box]);
 
+  // Precompute clipping planes for each slice
   const sliceClipPlanes = useMemo(() => {
     const result: THREE.Plane[][] = [];
     for (let si = 0; si < totalSlices; si++) {
@@ -672,9 +527,15 @@ function SlicedModel({ scene, cutResult, forceUpdate, preClipPlane }: {
       const maxB = si === totalSlices - 1 ? Infinity : cutPlanes[si];
 
       if (sliceNormalVec) {
-        if (isFinite(minB)) planes.push(new THREE.Plane(sliceNormalVec.clone(), -minB));
-        if (isFinite(maxB)) planes.push(new THREE.Plane(sliceNormalVec.clone().negate(), maxB));
+        // Rotated slicing: planes parallel to pre-cut plane, normal = sliceNormal
+        if (isFinite(minB)) {
+          planes.push(new THREE.Plane(sliceNormalVec.clone(), -minB));
+        }
+        if (isFinite(maxB)) {
+          planes.push(new THREE.Plane(sliceNormalVec.clone().negate(), maxB));
+        }
       } else {
+        // Axis-aligned slicing
         if (isFinite(minB)) {
           if (axis === 'x') planes.push(new THREE.Plane(new THREE.Vector3(1, 0, 0), -minB));
           else if (axis === 'z') planes.push(new THREE.Plane(new THREE.Vector3(0, 0, 1), -minB));
@@ -686,11 +547,14 @@ function SlicedModel({ scene, cutResult, forceUpdate, preClipPlane }: {
           else planes.push(new THREE.Plane(new THREE.Vector3(0, -1, 0), maxB));
         }
       }
+      // Add pre-cut plane — negated so we keep the remaining portion (same side as voxel filter)
       if (preClipPlane) {
         planes.push(preClipPlane.clone().negate());
       }
       result.push(planes);
     }
+    console.log('[SlicedModel] clipPlanes for', totalSlices, 'slices — axis:', axis, 'sliceNormal:', !!sliceNormalVec,
+      'cutPlanes:', cutPlanes.map(c => c.toFixed(3)), 'preClip:', !!preClipPlane);
     return result;
   }, [totalSlices, cutPlanes, axis, sliceNormalVec, preClipPlane]);
 
@@ -714,6 +578,8 @@ function SlicedModel({ scene, cutResult, forceUpdate, preClipPlane }: {
           </group>
         );
       })}
+      {/* Used portion overlay — white transparent */}
+      {preClipPlane && <UsedOverlay scene={scene} preClipPlane={preClipPlane} forceUpdate={forceUpdate} />}
       {camParams && <AutoFitCamera center={camParams.center} maxDim={camParams.maxDim} orientation={4} />}
     </group>
   );
@@ -726,6 +592,8 @@ function OriginalModel({ scene, orientation, forceUpdate, preClipPlane }: {
   forceUpdate: number;
   preClipPlane?: THREE.Plane | null;
 }) {
+  // Clone to avoid mutating the original scene's materials (matching coal-slicer's approach)
+  // Include forceUpdate in deps so the clone captures the latest wrapper transform after manual align
   const cloned = useMemo(() => scene.clone(), [scene, forceUpdate]);
 
   useEffect(() => {
@@ -735,6 +603,7 @@ function OriginalModel({ scene, orientation, forceUpdate, preClipPlane }: {
       const setProps = (m: THREE.Material) => {
         if ('color' in m && m.color instanceof THREE.Color) m.color.set('#7090c0');
         if ('roughness' in m) (m as THREE.MeshStandardMaterial).roughness = 0.5;
+        // Apply pre-cut clipping: negated plane shows the remaining portion
         if (preClipPlane) {
           if ('clippingPlanes' in m) {
             (m as THREE.MeshStandardMaterial).clippingPlanes = [preClipPlane.clone().negate()];
@@ -769,41 +638,9 @@ function OriginalModel({ scene, orientation, forceUpdate, preClipPlane }: {
   );
 }
 
-
-/* ── RenderMeshesWithMaterial: render collected meshes with a single material ── */
-function RenderMeshesWithMaterial({ meshData, material, renderOrder, onAfterRender }: {
-  meshData: { geometry: THREE.BufferGeometry; matrixWorld: THREE.Matrix4; name: string }[];
-  material: THREE.Material;
-  renderOrder?: number;
-  onAfterRender?: (renderer: THREE.WebGLRenderer) => void;
-}) {
-  return (
-    <>
-      {meshData.map((md, mi) => {
-        const p = new THREE.Vector3();
-        const q = new THREE.Quaternion();
-        const s = new THREE.Vector3();
-        md.matrixWorld.decompose(p, q, s);
-        return (
-          <mesh
-            key={`rwm-${mi}`}
-            geometry={md.geometry}
-            position={[p.x, p.y, p.z]}
-            quaternion={[q.x, q.y, q.z, q.w]}
-            scale={[s.x, s.y, s.z]}
-            material={material}
-            renderOrder={renderOrder}
-            onAfterRender={onAfterRender}
-          />
-        );
-      })}
-    </>
-  );
-}
-
-/* ═══════════════════════════════════════
+/* ═══════════════════════════════════════════
    Props
-═══════════════════════════════════════ */
+═══════════════════════════════════════════ */
 export interface ModelViewerConfig {
   shadows: boolean;
   contactShadow: boolean;
@@ -842,9 +679,9 @@ interface ModelViewerProps {
   style?: React.CSSProperties;
 }
 
-/* ═════════════════════════════════════════
+/* ═══════════════════════════════════════════
    Data panel dimensions
-═════════════════════════════════════════ */
+═══════════════════════════════════════════ */
 
 function useSceneDimensions(
   scene: THREE.Group | null,
@@ -855,6 +692,7 @@ function useSceneDimensions(
 
   useEffect(() => {
     if (!scene) { setDims(null); return; }
+    // Force fresh world matrix read — scene's internal quat/pos change after autoAlignTopFace
     scene.updateWorldMatrix(true, true);
     const box = computeSceneBox(scene);
     if (!box) { setDims(null); return; }
@@ -863,6 +701,10 @@ function useSceneDimensions(
     const sz = box.max.z - box.min.z;
     const length = sx >= sz ? sx : sz;
     const width = sx >= sz ? sz : sx;
+    console.log('[Dimensions] L:', length.toFixed(2), 'W:', width.toFixed(2), 'H:', sy.toFixed(2),
+      '— box:', box.min.x.toFixed(2), box.min.y.toFixed(2), box.min.z.toFixed(2),
+      '→', box.max.x.toFixed(2), box.max.y.toFixed(2), box.max.z.toFixed(2),
+      '| tick:', alignTick, 'force:', forceUpdate);
     setDims({
       length: length.toFixed(2),
       width: width.toFixed(2),
@@ -873,9 +715,9 @@ function useSceneDimensions(
   return dims;
 }
 
-/* ═════════════════════════════════════════
+/* ═══════════════════════════════════════════
    Exported component
-═════════════════════════════════════════ */
+═══════════════════════════════════════════ */
 export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerProps) {
   const [scene, setScene] = useState<THREE.Group | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -883,7 +725,7 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
   const [computing, setComputing] = useState(false);
   const [cutResult, setCutResult] = useState<CutResult | null>(null);
   const [alignTick, setAlignTick] = useState(0);
-  const [forceUpdate, setForceUpdate] = useState(0);
+  const [forceUpdate, setForceUpdate] = useState(0); // force R3F to re-read scene transforms
   const prevUrlRef = useRef<string | null>(null);
   const computingRef = useRef(false);
   const sceneRef = useRef<THREE.Group | null>(null);
@@ -900,9 +742,11 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
     const box = computeSceneBox(scene);
     if (!box) return null;
 
+    // cutAngle → normal direction in XZ plane
     const angleRad = (config.cutAngle * Math.PI) / 180;
     const cutNormal = new THREE.Vector3(Math.cos(angleRad), 0, Math.sin(angleRad)).normalize();
 
+    // Project all 8 corners of the bounding box onto the cut normal to find the range
     let minProj = Infinity, maxProj = -Infinity;
     const corners = [
       new THREE.Vector3(box.min.x, box.min.y, box.min.z),
@@ -922,15 +766,20 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
     const range = maxProj - minProj;
     if (range <= 0) return null;
 
+    // cutDepth percentage: used portion = minProj → planeDist (cutDepth% of range)
+    // Use NEGATED normal so that distanceToPoint >= 0 covers the "used" side (minProj→planeDist)
+    // and distanceToPoint < 0 covers the "remaining" side (planeDist→maxProj)
     const planeDist = minProj + range * (config.cutDepth / 100);
-    // preClipPlane keeps used (inner) side: cutNormal·p <= planeDist
-    // OriginalModel negates it to show remaining; UsedOverlay uses it directly to show used
     const plane = new THREE.Plane(cutNormal.clone().negate(), planeDist);
 
+    console.log('[PreCut] angle:', config.cutAngle, 'depth:', config.cutDepth,
+      'normal:', cutNormal.toArray().map(v => v.toFixed(3)),
+      'range:', minProj.toFixed(3), '→', maxProj.toFixed(3),
+      'planeDist:', planeDist.toFixed(3));
     return plane;
   }, [scene, config.cutAngle, config.cutDepth, forceUpdate]);
 
-  /* ── Full model volume ── */
+  /* ── Full model volume (computed once per scene load / alignment, no pre-cut) ── */
   const [fullVolume, setFullVolume] = useState<number | null>(null);
 
   useEffect(() => {
@@ -938,24 +787,28 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
     scene.updateWorldMatrix(true, true);
     const result = cpuExactEqualSlices(scene, 1, config.cutR);
     if (result) {
+      console.log('[FullVol] totalVolume:', result.totalVolume.toFixed(4));
       setFullVolume(result.totalVolume);
     }
   }, [scene, config.cutR, config.cutDepth, forceUpdate]);
 
-  /* ── cutNormal (points from used side toward remaining side, for parallel slicing) ── */
+  /* ── cutNormal (non-negated pre-cut normal, for parallel slicing) ── */
   const cutNormal = useMemo(() => {
     if (!preClipPlane) return null;
-    return preClipPlane.normal.clone().negate(); // cutNormal = direction from minProj to maxProj
+    return preClipPlane.normal.clone().negate();
   }, [preClipPlane]);
 
   /* ── Remaining volume (after pre-cut) ── */
   const remainingVolume = useMemo(() => {
     if (config.cutDepth <= 0) return null;
+    // When cutN > 0 and we have slice results, the cutResult totalVolume IS the remaining volume
     if (config.cutN > 0 && cutResult) return cutResult.totalVolume;
+    // When cutN === 0 and cutDepth > 0, compute separately
     if (!scene || !preClipPlane) return null;
     scene.updateWorldMatrix(true, true);
     const result = cpuExactEqualSlices(scene, 1, config.cutR, preClipPlane, cutNormal);
     if (!result) return null;
+    console.log('[RemainingVol] totalAfterPreCut:', result.totalVolume.toFixed(4));
     return result.totalVolume;
   }, [config.cutN, config.cutDepth, cutResult, scene, preClipPlane, cutNormal, config.cutR, forceUpdate]);
 
@@ -980,6 +833,8 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
       modelUrl,
       (gltf) => {
         const aligned = alignModelToGround(gltf.scene);
+        // aligned is the wrapper Group containing gltf.scene as a child.
+        // Store the wrapper as the scene so R3F renders the entire aligned group.
         setScene(aligned);
         setLoading(false);
       },
@@ -992,7 +847,7 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
     );
   }, [modelUrl]);
 
-  /* ── Slice computation ── */
+  /* ── Slice computation (when cutN > 0 and model is loaded) ── */
   useEffect(() => {
     const N = config.cutN;
     const R = config.cutR;
@@ -1007,8 +862,10 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
     computingRef.current = true;
     setComputing(true);
 
+    // Safety timeout: if computation hangs for > 15 seconds, reset
     const safetyTimer = setTimeout(() => {
       if (!cancelled) {
+        console.warn('[Slice] safety timeout — resetting computing state');
         setComputing(false);
         computingRef.current = false;
       }
@@ -1017,15 +874,26 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
     const mainTimer = setTimeout(() => {
       if (cancelled) return;
       try {
+        // Capture these now to avoid stale-closure issues
         const s = sceneRef.current;
         if (!s) { setComputing(false); return; }
         s.updateWorldMatrix(true, true);
 
+        console.log('[Slice] recomputing N=%d R=%d — alignTick:', N, R, alignTick,
+          'scene quat:', s.quaternion.x.toFixed(4), s.quaternion.y.toFixed(4),
+          s.quaternion.z.toFixed(4), s.quaternion.w.toFixed(4),
+          'preClip:', !!preClipPlane, 'cutNormal:', cutNormal?.toArray().map(v => v.toFixed(3)));
+
         const result = cpuExactEqualSlices(s, N, R, preClipPlane, cutNormal);
         if (!cancelled) {
           if (result) {
+            console.log('[Slice] result — box:',
+              result.boxMin.map(v => v.toFixed(2)), '→',
+              result.boxMax.map(v => v.toFixed(2)),
+              '| axis:', result.axis, '| totalVol:', result.totalVolume.toFixed(4));
             setCutResult(result);
           } else {
+            console.warn('[Slice] cpuExactEqualSlices returned null (totalVolume may be zero)');
             setCutResult(null);
           }
         }
@@ -1050,175 +918,32 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
     };
   }, [scene, config.cutN, config.cutR, alignTick, preClipPlane, cutNormal]);
 
-  /* ═════════════════════════════════════════
-     cutFace / cutBody mode rendering
-     ══════════════════════════════════════════ */
-
-  // Mesh data for stencil rendering
-  const meshData = useMemo(() => {
-    if (!scene) return [];
-    return collectMeshes(scene);
-  }, [scene, forceUpdate]);
-
-  // cutFace single-cut stencil cap
-  const cutFaceCapData = useMemo(() => {
-    if (config.mode !== 'cutFace' || !preClipPlane) return null;
-    const box = scene ? computeSceneBox(scene) : null;
-    if (!box) return null;
-    const range = { min: box.min.dot(preClipPlane.normal), max: box.max.dot(preClipPlane.normal) };
-    // Negate preClipPlane to get remaining-side plane for stencil cap rendering
-    const capPlane = preClipPlane.clone().negate();
-    return buildStencilCapData(capPlane, config.cutFaceMaskColor, range);
-  }, [config.mode, config.cutFaceMaskColor, preClipPlane, scene, forceUpdate]);
-
-  // cutFace multi-cut stencil caps
-  const cutFaceMultiCapData = useMemo(() => {
-    if (config.mode !== 'cutFace' || !preClipPlane || !cutResult || cutResult.cutPlanes.length === 0) return [];
-    const box = scene ? computeSceneBox(scene) : null;
-    if (!box) return [];
-    const range = { min: box.min.dot(preClipPlane.normal), max: box.max.dot(preClipPlane.normal) };
-    // Use preClipPlane boundary (planeDist) — cap at the actual cut surface, not at internal slice planes
-    const capPlane = preClipPlane.clone().negate();
-    const singleCap = buildStencilCapData(capPlane, config.cutFaceMaskColor, range);
-    return singleCap ? [singleCap] : [];
-  }, [config.mode, config.cutFaceMaskColor, cutResult, preClipPlane, scene, forceUpdate]);
-
-  // cutBody single-cut removed-portion material
-  const cutBodyMaterial = useMemo(() => {
-    if (config.mode !== 'cutBody' || !preClipPlane || !scene) return null;
-    if (meshData.length === 0) return null;
-    return buildCutBodyMaterial(
-      null, // material template
-      config.cutBodyMaskColor,
-      config.cutBodyRemovedOpacity,
-      preClipPlane,
-    );
-  }, [config.mode, config.cutBodyMaskColor, config.cutBodyRemovedOpacity, preClipPlane, scene, meshData]);
-
   const preset = (config.preset in LIGHTING_PRESETS ? config.preset : 'rembrandt') as PresetName;
   const showSlice = config.cutN > 0 && cutResult && !computing && !loading;
 
-  /* ═════════════════════════════════════════
-     Main render
-     ══════════════════════════════════════════ */
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative', ...style }}>
       <Canvas
         shadows={config.shadows}
         camera={{ fov: 45, near: 0.01, far: 10000, position: [5, 5, 5] }}
-        gl={{ antialias: true, stencil: true }}
+        gl={{ antialias: true }}
       >
         <SceneSetup />
         <SceneBackground color={config.background} />
         <LightingRig preset={preset} lightIntensity={config.lightIntensity} />
 
-                {/* ── Single-cut cutFace (no slices) ── */}
-        {config.mode === 'cutFace' && preClipPlane && !showSlice && scene && (
-          <>
-            {/* Single-cut stencil cap */}
-            {cutFaceCapData && meshData.length > 0 && (
-              <>
-                <RenderMeshesWithMaterial
-                  meshData={meshData}
-                  material={cutFaceCapData.stencilBack}
-                  renderOrder={1}
-                />
-                <RenderMeshesWithMaterial
-                  meshData={meshData}
-                  material={cutFaceCapData.stencilFront}
-                  renderOrder={2}
-                />
-                <mesh
-                  geometry={cutFaceCapData.geometry}
-                  material={cutFaceCapData.cap}
-                  renderOrder={3}
-                  onAfterRender={(renderer: THREE.WebGLRenderer) => { renderer.clearStencil(); }}
-                />
-              </>
-            )}
-            {/* Show original model dimmed (remaining side) */}
-            {config.cutFaceMultiStyle !== 'faceOnly' && (
-              <OriginalModel
-                key={`origcf-${forceUpdate}`}
-                scene={scene}
-                orientation={config.orientation}
-                forceUpdate={forceUpdate}
-                preClipPlane={preClipPlane}
-              />
-            )}
-          </>
-        )}
-
-        {/* ── Single-cut cutBody (no slices) ── */}
-        {config.mode === 'cutBody' && preClipPlane && !showSlice && scene && (
-          <>
-            {/* Original model showing remaining portion */}
-            <OriginalModel
-              key={`origcb-${forceUpdate}`}
-              scene={scene}
-              orientation={config.orientation}
-              forceUpdate={forceUpdate}
-              preClipPlane={preClipPlane}
-            />
-            {/* Removed (used) portion overlay */}
-            {cutBodyMaterial && meshData.length > 0 && (
-              <RenderMeshesWithMaterial
-                meshData={meshData}
-                material={cutBodyMaterial}
-                renderOrder={10}
-              />
-            )}
-          </>
-        )}
-
-        {/* ── Sliced model + mode-specific overlays (cutN > 0) ── */}
+        {/* Show sliced model when cutN > 0 and result is available */}
         {showSlice && scene && (
-          <>
-            {/* cutFace multi-cut stencil caps */}
-            {config.mode === 'cutFace' && meshData.length > 0 && cutFaceMultiCapData.map((capData, i) => (
-              <React.Fragment key={`cutface-multi-${i}`}>
-                <RenderMeshesWithMaterial
-                  meshData={meshData}
-                  material={capData.stencilBack}
-                  renderOrder={10 + i * 3}
-                />
-                <RenderMeshesWithMaterial
-                  meshData={meshData}
-                  material={capData.stencilFront}
-                  renderOrder={11 + i * 3}
-                />
-                <mesh
-                  geometry={capData.geometry}
-                  material={capData.cap}
-                  renderOrder={12 + i * 3}
-                  onAfterRender={(renderer: THREE.WebGLRenderer) => { renderer.clearStencil(); }}
-                />
-              </React.Fragment>
-            ))}
-            {/* cutBody used-portion overlay on top of sliced model */}
-            {config.mode === 'cutBody' && preClipPlane && cutBodyMaterial && meshData.length > 0 && (
-              <RenderMeshesWithMaterial
-                meshData={meshData}
-                material={cutBodyMaterial}
-                renderOrder={100}
-              />
-            )}
-            {/* Used-portion overlay for non-cutBody modes (white transparent) */}
-            {config.mode !== 'cutBody' && preClipPlane && (
-              <UsedOverlay scene={scene} preClipPlane={preClipPlane} forceUpdate={forceUpdate} />
-            )}
-            <SlicedModel key={`slice-${forceUpdate}`} scene={scene} cutResult={cutResult!} forceUpdate={forceUpdate} preClipPlane={preClipPlane} />
-          </>
+          <SlicedModel key={`slice-${forceUpdate}`} scene={scene} cutResult={cutResult!} forceUpdate={forceUpdate} preClipPlane={preClipPlane} />
         )}
 
-{/* ── Original model when no cut ── */}
-        {!showSlice && !preClipPlane && scene && !computing && (
-          <OriginalModel
-            key={`orig-${forceUpdate}`}
-            scene={scene}
-            orientation={config.orientation}
-            forceUpdate={forceUpdate}
-          />
+        {/* Show original model when cutN === 0 */}
+        {!showSlice && scene && !computing && (
+          <>
+            <OriginalModel key={`orig-${forceUpdate}`} scene={scene} orientation={config.orientation} forceUpdate={forceUpdate} preClipPlane={preClipPlane} />
+            {/* Used portion overlay for non-sliced pre-cut */}
+            {preClipPlane && <UsedOverlay scene={scene} preClipPlane={preClipPlane} forceUpdate={forceUpdate} />}
+          </>
         )}
 
         {config.contactShadow && (
@@ -1278,7 +1003,7 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
         </div>
       )}
 
-      {/* Manual align button */}
+      {/* Manual top-face align button — always visible when scene is loaded */}
       {scene && !loading && (
         <div style={{
           position: 'absolute', bottom: 20, left: '50%', transform: 'translateX(-50%)',
@@ -1288,8 +1013,16 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
             onClick={() => {
               const s = sceneRef.current;
               if (!s) return;
+
+              // 1. 先补充底层水平面（XZ 凸包，帮助后续找底面）
               addBottomCap(s);
+
+              // 2. 底面矫正（封底面会被移除后重建）
               autoAlignTopFace(s, true);
+
+              // 3. autoAlignTopFace 内部已重建封底面，无需再次调用 addBottomCap
+
+              // 4. 触发 React 重渲染
               setScene(s);
               setForceUpdate(t => t + 1);
               setAlignTick(t => t + 1);
@@ -1306,9 +1039,20 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
               boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
               transition: 'all 0.2s',
             }}
+            onMouseEnter={e => {
+              e.currentTarget.style.borderColor = 'rgba(127, 156, 255, 0.7)';
+              e.currentTarget.style.color = '#c8d6f8';
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.borderColor = 'rgba(127, 156, 255, 0.35)';
+              e.currentTarget.style.color = '#a0c0ff';
+            }}
           >
             📐 自动找顶面
           </button>
+          <span style={{ fontSize: 10, color: 'rgba(160, 192, 255, 0.4)', maxWidth: 200, textAlign: 'center', lineHeight: 1.3 }}>
+            自动寻找俯视图投影面积最大的面作为顶面
+          </span>
         </div>
       )}
 
@@ -1343,10 +1087,12 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
           lineHeight: 1.8,
           pointerEvents: 'auto',
         }}>
+          {/* Header */}
           <div style={{ fontWeight: 700, fontSize: 13, color: '#c8d6f8', marginBottom: 8, borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: 6 }}>
             ⛏️ 模型数据
           </div>
 
+          {/* Dimensions */}
           {dimensions && (
             <div style={{ marginBottom: 6 }}>
               <div style={{ color: '#556080', fontSize: 10, marginBottom: 2 }}>📐 尺寸</div>
@@ -1356,7 +1102,7 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
             </div>
           )}
 
-          {/* Pre-cut info */}
+          {/* Pre-cut info (when cutDepth > 0) */}
           {preClipPlane && (
             <div style={{ marginBottom: 6 }}>
               <div style={{ fontWeight: 700, fontSize: 13, color: '#c8d6f8', marginTop: 8, marginBottom: 6, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 6 }}>
@@ -1371,7 +1117,7 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
             </div>
           )}
 
-          {/* Volume info */}
+          {/* Volume overview (when pre-cut is active) */}
           {preClipPlane && fullVolume !== null && (
             <div style={{ marginBottom: 6 }}>
               <div style={{ fontWeight: 700, fontSize: 13, color: '#c8d6f8', marginTop: 8, marginBottom: 6, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 6 }}>
@@ -1393,10 +1139,13 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
                   </div>
                 </>
               )}
+              {remainingVolume === null && (
+                <div style={{ color: '#556080', fontSize: 11 }}>计算中…</div>
+              )}
             </div>
           )}
 
-          {/* Slice params */}
+          {/* Slice params (when cutN > 0) */}
           {config.cutN > 0 && (
             <div style={{ marginBottom: 6 }}>
               <div style={{ color: '#556080', fontSize: 10, marginBottom: 2 }}>⚙️ 切割参数</div>
@@ -1416,11 +1165,16 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
               </div>
               <div style={{ color: '#8090b0', marginBottom: 4 }}>
                 总体积：<span style={{ color: '#ffd700', fontWeight: 600 }}>{formatVolume(cutResult.totalVolume)}</span>
+                {remainingVolume !== null && remainingVolume !== cutResult.totalVolume && (
+                  <span style={{ color: '#6070a0', fontSize: 10 }}> (剩余)</span>
+                )}
               </div>
               <div style={{ color: '#8090b0', marginBottom: 6 }}>
                 切割轴：<span style={{ color: '#a0c0ff', fontWeight: 600 }}>{cutResult.axis.toUpperCase()} 轴</span>
                 {' · '}{cutResult.cutPlanes.length} 刀 → {cutResult.sliceVolumes.length} 块
               </div>
+
+              {/* Per-slice list */}
               <div style={{
                 maxHeight: 200, overflowY: 'auto',
                 scrollbarWidth: 'thin', scrollbarColor: '#2e3254 transparent',
@@ -1454,12 +1208,19 @@ export default function Itlmodelviewer({ modelUrl, config, style }: ModelViewerP
             </>
           )}
 
-          {/* Mode info */}
-          <div style={{ marginTop: 8, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 6, color: '#556080', fontSize: 10 }}>
-            模式：{config.mode === 'cutFace' ? '🔪 切割面' : '🧊 切割体'}
-            {' | '}多刀：{config.cutN > 0 ? `N=${config.cutN}` : '关'}
-          </div>
+          {/* Hint when cutN > 0 but no result yet / computing */}
+          {config.cutN > 0 && !cutResult && computing && (
+            <div style={{ color: '#556080', fontSize: 11, marginTop: 6 }}>
+              正在计算等体积切割…
+            </div>
+          )}
 
+          {/* Hint when cutN === 0 */}
+          {config.cutN === 0 && (
+            <div style={{ color: '#3a4060', fontSize: 11, marginTop: 6 }}>
+              设置 cutN &gt; 0 以启用等体积切割
+            </div>
+          )}
         </div>
       )}
     </div>

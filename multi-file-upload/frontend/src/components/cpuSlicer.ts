@@ -68,8 +68,18 @@ export function cpuExactEqualSlices(
   const resY = Math.ceil(size.y / voxelSize);
   const resZ = Math.ceil(size.z / voxelSize);
 
-  const axi = size.x >= size.z ? 0 : 2;
-  const axis = axi === 0 ? 'x' : 'z';
+  // When sliceNormal is provided and axis-aligned, force axis to match it
+  // (otherwise the auto-pick may choose wrong axis and slices appear perpendicular)
+  let axi: number;
+  let axis: string;
+  if (sliceNormal) {
+    if (Math.abs(sliceNormal.x) > 0.999) { axi = 0; axis = 'x'; }
+    else if (Math.abs(sliceNormal.z) > 0.999) { axi = 2; axis = 'z'; }
+    else { axi = size.x >= size.z ? 0 : 2; axis = axi === 0 ? 'x' : 'z'; }
+  } else {
+    axi = size.x >= size.z ? 0 : 2;
+    axis = axi === 0 ? 'x' : 'z';
+  }
   const cutAxisRes = axi === 0 ? resX : resZ;
   const perpI = axi === 0 ? 1 : 0;
   const perpJ = axi === 0 ? 2 : 1;
@@ -129,6 +139,7 @@ export function cpuExactEqualSlices(
 
   return buildCutResult(
     columnVolumes, cutAxisRes, box, axis, axi, size, voxelSize, N,
+    sliceNormal ? [sliceNormal.x, sliceNormal.y, sliceNormal.z] as [number, number, number] : undefined,
   );
 }
 
@@ -296,6 +307,7 @@ function buildCutResult(
   size: THREE.Vector3,
   voxelSize: number,
   N: number,
+  sliceNormal?: [number, number, number],
 ): CutResult {
   const cdf = new Float64Array(cutAxisRes);
   cdf[0] = columnVolumes[0];
@@ -329,6 +341,7 @@ function buildCutResult(
   return {
     cutPlanes,
     axis,
+    sliceNormal,
     sliceVolumes,
     slicePercentages: sliceVolumes.map((v) => +(v / totalVolume * 100).toFixed(2)),
     totalVolume,
